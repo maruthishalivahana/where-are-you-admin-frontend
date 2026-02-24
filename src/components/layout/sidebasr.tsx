@@ -2,17 +2,18 @@
 
 import { cn } from "@/lib/utils";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { useAuth } from "@/context/AuthContext";
 import {
     LayoutDashboard,
     Bus,
     Users,
-    Map,
     UserCircle,
     Bell,
     Settings,
     X,
     Route,
+    LogOut,
 } from "lucide-react";
 
 const navItems = [
@@ -30,6 +31,8 @@ interface SidebarProps {
 
 export function Sidebar({ isOpen, onClose }: SidebarProps) {
     const pathname = usePathname();
+    const router = useRouter();
+    const { logout, user } = useAuth();
 
     return (
         <>
@@ -159,8 +162,8 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                     </div>
                 </nav>
 
-                {/* User Profile */}
-                <div className="px-2 py-4 border-t border-gray-100">
+                {/* User Profile + Logout */}
+                <div className="px-2 py-4 border-t border-gray-100 space-y-1">
                     <div
                         className={cn(
                             "flex items-center gap-3 px-2 py-2 rounded-xl hover:bg-gray-50 cursor-pointer transition-colors",
@@ -168,7 +171,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                         )}
                     >
                         <div className="w-9 h-9 rounded-full bg-linear-to-br from-blue-400 to-indigo-600 flex items-center justify-center text-white text-sm font-bold shrink-0">
-                            AR
+                            {user?.name ? user.name.slice(0, 2).toUpperCase() : "AD"}
                         </div>
                         <div
                             className={cn(
@@ -176,10 +179,29 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                                 isOpen ? "opacity-100 w-auto" : "opacity-0 w-0 overflow-hidden"
                             )}
                         >
-                            <p className="text-sm font-semibold text-gray-900 truncate">Alex Rivera</p>
-                            <p className="text-xs text-gray-400 truncate">Super Admin</p>
+                            <p className="text-sm font-semibold text-gray-900 truncate">{user?.name ?? "Admin"}</p>
+                            <p className="text-xs text-gray-400 truncate">{user?.organizationName ?? "Administrator"}</p>
                         </div>
                     </div>
+                    {/* Logout */}
+                    <button
+                        title={!isOpen ? "Logout" : undefined}
+                        onClick={() => { logout(); router.replace("/login"); }}
+                        className={cn(
+                            "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm text-red-500 hover:bg-red-50 font-medium transition-colors",
+                            !isOpen && "justify-center px-0"
+                        )}
+                    >
+                        <LogOut className="w-5 h-5 shrink-0" />
+                        <span
+                            className={cn(
+                                "whitespace-nowrap transition-all duration-200",
+                                isOpen ? "opacity-100 w-auto" : "opacity-0 w-0 overflow-hidden"
+                            )}
+                        >
+                            Logout
+                        </span>
+                    </button>
                 </div>
             </aside>
         </>
