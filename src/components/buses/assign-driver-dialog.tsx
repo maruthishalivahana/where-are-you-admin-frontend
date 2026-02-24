@@ -16,9 +16,9 @@ import { Driver } from "@/services/api"
 interface AssignDriverDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  onSubmit: (driverId: string) => void
+  onSubmit: (memberId: string) => void
   drivers: Driver[]
-  selectedBus?: any
+  selectedBus?: { numberPlate?: string } | null
 }
 
 export function AssignDriverDialog({
@@ -28,19 +28,19 @@ export function AssignDriverDialog({
   drivers,
   selectedBus,
 }: AssignDriverDialogProps) {
-  const [driverId, setDriverId] = useState("")
+  const [memberId, setMemberId] = useState("")
   const [error, setError] = useState("")
 
   const handleOpenChange = (nextOpen: boolean) => {
     if (!nextOpen) {
-      setDriverId("")
+      setMemberId("")
       setError("")
     }
     onOpenChange(nextOpen)
   }
 
   const handleSubmit = () => {
-    const value = driverId.trim()
+    const value = memberId.trim()
 
     if (!value) {
       setError("Please select a driver")
@@ -49,7 +49,7 @@ export function AssignDriverDialog({
 
     setError("")
     onSubmit(value)
-    setDriverId("")
+    setMemberId("")
   }
 
   return (
@@ -69,9 +69,9 @@ export function AssignDriverDialog({
             </label>
             <select
               id="driver-select"
-              value={driverId}
+              value={memberId}
               onChange={(event) => {
-                setDriverId(event.target.value)
+                setMemberId(event.target.value)
                 if (error) setError("")
               }}
               className="h-9 w-full rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -79,8 +79,8 @@ export function AssignDriverDialog({
               <option value="">-- Select a driver --</option>
               {drivers.length > 0 ? (
                 drivers.map((driver) => (
-                  <option key={driver._id || driver.id} value={driver._id || driver.id || ""}>
-                    {driver.name} {driver.licenseNumber ? `(${driver.licenseNumber})` : ""}
+                  <option key={driver.memberId || driver._id || driver.id} value={driver.memberId || ""}>
+                    {driver.name} {driver.memberId ? `(${driver.memberId})` : ""}
                   </option>
                 ))
               ) : (

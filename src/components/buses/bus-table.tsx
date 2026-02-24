@@ -47,9 +47,10 @@ interface BusTableProps {
   onRouteFilterChange: (value: string) => void
   onStatusFilterChange: (value: string) => void
   onClearFilters: () => void
-  onAssignDriver: (bus: Bus) => void
-  onViewBus: (bus: Bus) => void
-  onDeleteBus: (bus: Bus) => void
+  onAssignDriver: (bus: Bus, index: number) => void
+  onChangeRoute: (bus: Bus, index: number) => void
+  onViewBus: (bus: Bus, index: number) => void
+  onDeleteBus: (bus: Bus, index: number) => void
 }
 
 export function BusTable({
@@ -61,6 +62,7 @@ export function BusTable({
   onStatusFilterChange,
   onClearFilters,
   onAssignDriver,
+  onChangeRoute,
   onViewBus,
   onDeleteBus,
 }: BusTableProps) {
@@ -155,8 +157,10 @@ export function BusTable({
                 </TableCell>
               </TableRow>
             ) : (
-              buses.map((bus) => (
-                <TableRow key={bus.id || bus._id} className="hover:bg-gray-50/70">
+              buses.map((bus, idx) => {
+                const stableKey = `${bus._id || bus.id || bus.numberPlate || "bus"}-${idx}`
+                return (
+                  <TableRow key={stableKey} className="hover:bg-gray-50/70">
                   {/* Number Plate */}
                   <TableCell className="font-semibold text-gray-900">
                     {bus.numberPlate}
@@ -217,7 +221,7 @@ export function BusTable({
                       <Button
                         variant="ghost"
                         size="icon-sm"
-                        onClick={() => onViewBus(bus)}
+                        onClick={() => onViewBus(bus, idx)}
                         className="rounded-lg hover:bg-gray-100 h-8 w-8"
                         title="View Details"
                       >
@@ -227,7 +231,7 @@ export function BusTable({
                       <Button
                         variant="ghost"
                         size="icon-sm"
-                        onClick={() => onAssignDriver(bus)}
+                        onClick={() => onAssignDriver(bus, idx)}
                         className="rounded-lg hover:bg-gray-100 h-8 w-8"
                         title="Assign Driver"
                       >
@@ -245,16 +249,21 @@ export function BusTable({
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end" className="rounded-lg">
-                          <DropdownMenuItem onClick={() => onDeleteBus(bus)}>
+                          <DropdownMenuItem onClick={() => onDeleteBus(bus, idx)}>
                             <Trash2 className="size-4" />
                             Delete Bus
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => onChangeRoute(bus, idx)}>
+                            <ListFilter className="size-4" />
+                            Change Route
                           </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
                     </div>
                   </TableCell>
-                </TableRow>
-              ))
+                  </TableRow>
+                )
+              })
             )}
           </TableBody>
         </Table>

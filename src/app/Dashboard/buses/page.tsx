@@ -11,9 +11,18 @@ import { Header } from "@/components/layout/header"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogDescription,
+} from "@/components/ui/dialog"
+import {
   getBuses,
   createBus,
   updateBusDriver,
+  updateBusRoute,
   deleteBus,
   getBusById,
   getRoutes,
@@ -32,6 +41,29 @@ interface BusWithDriverName extends Bus {
   driverName?: string
   createdAt?: string
   updatedAt?: string
+}
+
+const ROUTE_CACHE_KEY = "busRouteCache"
+
+const loadRouteCache = (): Record<string, string> => {
+  if (typeof window === "undefined") return {}
+  try {
+    const raw = localStorage.getItem(ROUTE_CACHE_KEY)
+    return raw ? JSON.parse(raw) as Record<string, string> : {}
+  } catch {
+    return {}
+  }
+}
+
+const saveRouteToCache = (key: string, routeName: string | undefined) => {
+  if (typeof window === "undefined" || !routeName) return
+  try {
+    const cache = loadRouteCache()
+    cache[key] = routeName
+    localStorage.setItem(ROUTE_CACHE_KEY, JSON.stringify(cache))
+  } catch {
+    // ignore cache write errors
+  }
 }
 
 const extractList = <T,>(input: unknown, keys: string[]): T[] => {
@@ -88,6 +120,9 @@ export default function BusesPage() {
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false)
   const [isAssignDriverDialogOpen, setIsAssignDriverDialogOpen] = useState(false)
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
+  const [isRouteDialogOpen, setIsRouteDialogOpen] = useState(false)
+  const [selectedRouteName, setSelectedRouteName] = useState<string>("")
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
 
   const [routeFilter, setRouteFilter] = useState("All Routes")
   const [statusFilter, setStatusFilter] = useState("All Status")
@@ -106,26 +141,139 @@ export default function BusesPage() {
         getDrivers(),
       ])
 
+      let busesData: BusResponse[] = []
+      let routesData: Route[] = []
+      let driversData: Driver[] = []
+      const routeCache = loadRouteCache()
+
       if (busesRes.status === "fulfilled") {
-        const busesData = extractList<BusResponse>(busesRes.value.data, ["buses", "data"])
-        setBuses(busesData)
+        busesData = extractList<BusResponse>(busesRes.value.data, ["buses", "data"])
       } else {
         showToast("error", getErrorMessage(busesRes.reason, "Failed to fetch buses."))
       }
 
       if (routesRes.status === "fulfilled") {
-        const routesData = extractList<Route>(routesRes.value.data, ["routes", "data"])
+        routesData = extractList<Route>(routesRes.value.data, ["routes", "data"])
         setRoutes(routesData)
       }
 
       if (driversRes.status === "fulfilled") {
-        const driversData = extractList<Driver>(driversRes.value.data, ["drivers", "data"])
-        setDrivers(driversData)
+        driversData = extractList<Driver>(driversRes.value.data, ["drivers", "data"])
       } else {
         // Drivers are optional for showing buses; degrade gracefully
         showToast("error", "Drivers unavailable (404). You can still view buses.")
-        setDrivers([])
+        driversData = []
       }
+
+      // Map routes for quick lookup by id/name (support varied backend keys)
+      const routeLookup = new Map<string, string>()
+      routesData.forEach((r) => {
+        const typedRoute = r as unknown as {
+          _id?: string
+          id?: string
+          routeId?: string
+          route_id?: string
+          name?: string
+        }
+        const keys = [typedRoute._id, typedRoute.id, typedRoute.routeId, typedRoute.route_id, typedRoute.name]
+        keys.filter(Boolean).forEach((key) => {
+          if (key && typedRoute.name) routeLookup.set(String(key), typedRoute.name)
+        })
+      })
+
+      // Map drivers by multiple identifiers for matching
+      const driverLookup = new Map<string, Driver>()
+      driversData.forEach((d) => {
+        [d._id, d.id, d.memberId].forEach((key) => {
+          if (key) driverLookup.set(String(key), d)
+        })
+      })
+
+      // Enrich buses with driver names from driver list
+      const extractBusDriverIds = (bus: BusResponse) => {
+        const typedBus = bus as unknown as {
+          driverId?: string | number
+          driver_id?: string | number
+          driverMemberId?: string | number
+          driver_member_id?: string | number
+          driver?: { memberId?: string | number; _id?: string | number; id?: string | number }
+        }
+
+        return [
+          typedBus.driverId,
+          typedBus.driver_id,
+          typedBus.driverMemberId,
+          typedBus.driver_member_id,
+          typedBus.driver?.memberId,
+          typedBus.driver?._id,
+          typedBus.driver?.id,
+        ].filter(Boolean) as Array<string | number>
+      }
+
+      const busesWithDriverNames = busesData.map((bus) => {
+        const candidateKeys = extractBusDriverIds(bus)
+
+        // Normalize route name/id if backend embeds route object
+        const typedBus = bus as unknown as {
+          route?: { name?: string; _id?: string; id?: string; routeId?: string; route_id?: string; routeName?: string }
+          routeId?: string
+          route_id?: string
+          routeName?: string
+        }
+        const normalizedRouteId = typedBus.routeId
+          ?? typedBus.route_id
+          ?? typedBus.route?.routeId
+          ?? typedBus.route?.route_id
+          ?? typedBus.route?._id
+          ?? typedBus.route?.id
+        const normalizedRouteName = typedBus.routeName
+          ?? typedBus.route?.name
+          ?? typedBus.route?.routeName
+          ?? (normalizedRouteId ? routeLookup.get(String(normalizedRouteId)) : undefined)
+          ?? (typedBus.route ? undefined : undefined)
+
+        let driverMatch: Driver | undefined
+        for (const key of candidateKeys) {
+          const match = driverLookup.get(String(key))
+          if (match) {
+            driverMatch = match
+            break
+          }
+        }
+
+        const cacheKey = String(bus._id || (bus as unknown as { id?: string }).id || bus.numberPlate)
+
+        return {
+          ...bus,
+          driverName: driverMatch?.name,
+          routeName: normalizedRouteName ?? bus.routeName ?? routeCache[cacheKey],
+          routeId: normalizedRouteId ?? (bus as unknown as { routeId?: string }).routeId,
+        }
+      })
+
+      // Build assignment map: driver identifier -> bus number
+      const assignmentMap = new Map<string, string>()
+      busesWithDriverNames.forEach((bus) => {
+        const identifiers = extractBusDriverIds(bus as BusResponse)
+        identifiers.forEach((id) => {
+          assignmentMap.set(String(id), bus.numberPlate)
+        })
+      })
+
+      const driversWithAssignment = driversData.map((d) => {
+        const candidateKeys = [d._id, d.id, d.memberId].filter(Boolean) as Array<string | number>
+        const assigned = candidateKeys.map((k) => assignmentMap.get(String(k))).find(Boolean)
+        const clone: Driver = { ...d }
+        if (assigned) {
+          clone.assignedBusNumber = assigned
+        } else if ("assignedBusNumber" in clone) {
+          delete (clone as { assignedBusNumber?: string }).assignedBusNumber
+        }
+        return clone
+      })
+
+      setBuses(busesWithDriverNames)
+      setDrivers(driversWithAssignment)
     } catch (err) {
       console.error("Failed to fetch data:", err)
       showToast("error", getErrorMessage(err, "Failed to fetch buses. Please try again."))
@@ -171,6 +319,8 @@ export default function BusesPage() {
 
       const newBus = response.data.bus
       setBuses(prev => [newBus, ...prev])
+      const cacheKey = String(newBus._id || (newBus as unknown as { id?: string }).id || newBus.numberPlate)
+      saveRouteToCache(cacheKey, newBus.routeName ?? routeName)
       setIsAddDialogOpen(false)
       showSuccess("Bus created successfully!")
     } catch (err: unknown) {
@@ -180,20 +330,45 @@ export default function BusesPage() {
     }
   }, [])
 
-  const handleAssignDriver = useCallback(async (driverId: string) => {
+  const handleAssignDriver = useCallback(async (memberId: string) => {
     if (!selectedBus) return
 
     try {
       setLoading(true)
       const busId = selectedBus._id || selectedBus.id || ""
       const response = await updateBusDriver(busId, {
-        driverId
+        memberId
       })
 
+      const updatedBus = response.data.bus
+      const driver = drivers.find((d) => d.memberId === memberId)
+      const driverName = driver?.name
+
       setBuses(prev =>
-        prev.map(bus => (bus._id === selectedBus._id || bus.id === selectedBus.id) ? response.data.bus : bus)
+        prev.map((bus, idx) => {
+          const idMatch = bus._id && selectedBus._id && bus._id === selectedBus._id
+          const idxMatch = selectedIndex !== null && idx === selectedIndex
+          return (idMatch || idxMatch)
+            ? { ...updatedBus, driverName }
+            : bus
+        })
       )
+
+      // Reflect assignment on drivers list for driver page + reuse
+      setDrivers(prev => prev.map(d => {
+        const id = d._id || d.id
+        if (d.memberId === memberId) {
+          return { ...d, assignedBusNumber: selectedBus.numberPlate }
+        }
+        if (selectedBus.driverId && id === selectedBus.driverId) {
+          const clone = { ...d }
+          delete (clone as { assignedBusNumber?: string }).assignedBusNumber
+          return clone
+        }
+        return d
+      }))
       setSelectedBus(null)
+      setSelectedIndex(null)
       setIsAssignDriverDialogOpen(false)
       showSuccess("Driver assigned successfully!")
     } catch (err: unknown) {
@@ -201,7 +376,43 @@ export default function BusesPage() {
     } finally {
       setLoading(false)
     }
-  }, [selectedBus])
+  }, [drivers, selectedBus, selectedIndex])
+
+  const handleOpenRouteDialog = useCallback((bus: BusWithDriverName, idx: number) => {
+    setSelectedBus(bus)
+    setSelectedIndex(idx)
+    setSelectedRouteName(bus.routeName || "")
+    setIsRouteDialogOpen(true)
+  }, [])
+
+  const handleUpdateRoute = useCallback(async () => {
+    if (!selectedBus) return
+    try {
+      setLoading(true)
+      const busId = selectedBus._id || selectedBus.id || ""
+      const response = await updateBusRoute(busId, { routeName: selectedRouteName })
+      const updatedBus = response.data.bus
+      const cacheKey = String(selectedBus._id || selectedBus.id || selectedBus.numberPlate)
+      saveRouteToCache(cacheKey, selectedRouteName)
+
+      setBuses(prev => prev.map((bus, idx) => {
+        const idMatch = bus._id && selectedBus._id && bus._id === selectedBus._id
+        const idxMatch = selectedIndex !== null && idx === selectedIndex
+        return (idMatch || idxMatch)
+          ? { ...updatedBus, driverName: bus.driverName }
+          : bus
+      }))
+
+      setIsRouteDialogOpen(false)
+      setSelectedBus(null)
+      setSelectedIndex(null)
+      showSuccess("Route updated")
+    } catch (err: unknown) {
+      showError(getErrorMessage(err, "Failed to update route"))
+    } finally {
+      setLoading(false)
+    }
+  }, [selectedBus, selectedRouteName, selectedIndex])
 
   const handleDeleteBus = useCallback(async () => {
     if (!selectedBus) return
@@ -211,8 +422,24 @@ export default function BusesPage() {
       const busId = selectedBus._id || selectedBus.id || ""
       await deleteBus(busId)
 
-      setBuses(prev => prev.filter(bus => (bus._id !== selectedBus._id && bus.id !== selectedBus.id)))
+      const cacheKey = String(selectedBus._id || selectedBus.id || selectedBus.numberPlate)
+      if (typeof window !== "undefined") {
+        try {
+          const cache = loadRouteCache()
+          delete cache[cacheKey]
+          localStorage.setItem(ROUTE_CACHE_KEY, JSON.stringify(cache))
+        } catch {
+          // ignore cache errors
+        }
+      }
+
+      setBuses(prev => prev.filter((bus, idx) => {
+        const idMatch = bus._id && selectedBus._id && bus._id === selectedBus._id
+        const idxMatch = selectedIndex !== null && idx === selectedIndex
+        return !(idMatch || idxMatch)
+      }))
       setSelectedBus(null)
+      setSelectedIndex(null)
       setIsDeleteDialogOpen(false)
       showSuccess("Bus deleted successfully!")
     } catch (err: unknown) {
@@ -220,7 +447,7 @@ export default function BusesPage() {
     } finally {
       setLoading(false)
     }
-  }, [selectedBus])
+  }, [selectedBus, selectedIndex])
 
   const handleViewBus = useCallback(async (bus: BusWithDriverName) => {
     try {
@@ -322,13 +549,42 @@ export default function BusesPage() {
               setRouteFilter("All Routes")
               setStatusFilter("All Status")
             }}
-            onAssignDriver={(bus) => {
-              setSelectedBus(buses.find(b => b._id === bus._id || b.id === bus.id) || null)
+            onAssignDriver={(bus, idx) => {
+              const matchIndex = buses.findIndex(b =>
+                (b._id && bus._id && b._id === bus._id)
+                || (b.id && bus.id && b.id === bus.id)
+                || b.numberPlate === bus.numberPlate
+              )
+              const resolvedIndex = matchIndex !== -1 ? matchIndex : idx
+              const match = matchIndex !== -1 ? buses[matchIndex] : buses[resolvedIndex]
+
+              setSelectedBus(match || null)
+              setSelectedIndex(resolvedIndex)
               setIsAssignDriverDialogOpen(true)
             }}
-            onViewBus={handleViewBus}
-            onDeleteBus={(bus) => {
-              setSelectedBus(buses.find(b => b._id === bus._id || b.id === bus.id) || null)
+            onChangeRoute={(bus, idx) => {
+              const matchIndex = buses.findIndex(b =>
+                (b._id && bus._id && b._id === bus._id)
+                || (b.id && bus.id && b.id === bus.id)
+                || b.numberPlate === bus.numberPlate
+              )
+              const resolvedIndex = matchIndex !== -1 ? matchIndex : idx
+              const match = matchIndex !== -1 ? buses[matchIndex] : buses[resolvedIndex]
+
+              if (match) handleOpenRouteDialog(match, resolvedIndex)
+            }}
+            onViewBus={(bus) => handleViewBus(bus)}
+            onDeleteBus={(bus, idx) => {
+              const matchIndex = buses.findIndex(b =>
+                (b._id && bus._id && b._id === bus._id)
+                || (b.id && bus.id && b.id === bus.id)
+                || b.numberPlate === bus.numberPlate
+              )
+              const resolvedIndex = matchIndex !== -1 ? matchIndex : idx
+              const match = matchIndex !== -1 ? buses[matchIndex] : buses[resolvedIndex]
+
+              setSelectedBus(match || null)
+              setSelectedIndex(resolvedIndex)
               setIsDeleteDialogOpen(true)
             }}
           />
@@ -350,6 +606,38 @@ export default function BusesPage() {
         drivers={drivers}
         selectedBus={selectedBus}
       />
+
+      <Dialog open={isRouteDialogOpen} onOpenChange={setIsRouteDialogOpen}>
+        <DialogContent className="sm:max-w-md rounded-xl">
+          <DialogHeader>
+            <DialogTitle>Change Route</DialogTitle>
+            <DialogDescription>
+              Select a route to assign to this bus.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            <label className="text-sm font-medium text-gray-700">Route</label>
+            <select
+              value={selectedRouteName}
+              onChange={(e) => setSelectedRouteName(e.target.value)}
+              className="h-10 w-full rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">None</option>
+              {routes.map((route) => (
+                <option key={route._id || route.name} value={route.name}>{route.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsRouteDialogOpen(false)} className="rounded-lg">Cancel</Button>
+            <Button onClick={handleUpdateRoute} disabled={loading} className="rounded-lg bg-blue-600 hover:bg-blue-700">
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ViewBusDialog removed due to missing module */}
 

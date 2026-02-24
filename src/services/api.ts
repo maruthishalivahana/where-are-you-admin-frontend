@@ -155,7 +155,11 @@ export interface CreateBusPayload {
 }
 
 export interface UpdateBusDriverPayload {
-    driverId: string;
+    memberId: string;
+}
+
+export interface UpdateBusRoutePayload {
+    routeName: string;
 }
 
 export interface BusResponse {
@@ -184,6 +188,9 @@ export const getBusById = (busId: string) =>
 export const updateBusDriver = (busId: string, data: UpdateBusDriverPayload) =>
     api.put<{ bus: BusResponse }>(`/api/buses/${busId}/driver`, data);
 
+export const updateBusRoute = (busId: string, data: UpdateBusRoutePayload) =>
+    api.put<{ bus: BusResponse }>(`/api/buses/${busId}/route`, data);
+
 export const deleteBus = (busId: string) =>
     api.delete(`/api/buses/${busId}`);
 
@@ -196,10 +203,59 @@ export interface Driver {
     email?: string;
     phone?: string;
     licenseNumber?: string;
+    memberId?: string;
+    assignedBusNumber?: string;
     createdAt?: string;
 }
 
+const DRIVER_ENDPOINTS = [
+    // Backend primaries (provided)
+    "/api/driver/admin/all",
+    "/api/auth/admin/drivers",
+    // Common alternates / fallbacks
+    "/api/drivers",
+    "/api/admin/drivers",
+    "/api/driver",
+    "/api/admin/driver",
+    "/api/auth/drivers",
+];
+
+// Try multiple possible driver endpoints to handle backend variations
+const tryDriverRequest = async <T>(
+    method: "get" | "post",
+    payload?: unknown
+) => {
+    let lastError: unknown;
+    const baseUrls: (string | undefined)[] = [api.defaults.baseURL || undefined, undefined];
+
+    for (const path of DRIVER_ENDPOINTS) {
+        for (const baseURL of baseUrls) {
+            try {
+                if (method === "get") {
+                    return await api.request<T>({ url: path, method: "get", baseURL });
+                }
+                return await api.request<T>({ url: path, method: "post", data: payload, baseURL });
+            } catch (err: unknown) {
+                lastError = err;
+                const status = (err as { response?: { status?: number } })?.response?.status;
+                if (status !== 404) throw err;
+                // On 404 keep trying other baseURL/paths
+            }
+        }
+    }
+    throw lastError ?? new Error("Driver endpoint not found");
+};
+
 export const getDrivers = () =>
-    api.get<{ drivers: Driver[] } | { data: Driver[] }>("/api/admin/drivers");
+    tryDriverRequest<{ drivers: Driver[] } | { data: Driver[] }>("get");
+
+export interface CreateDriverPayload {
+    name: string;
+    memberId: string;
+    password: string;
+}
+
+export const createDriver = (data: CreateDriverPayload) =>
+    tryDriverRequest<{ driver: Driver }>("post", data);
 
 export default api;
