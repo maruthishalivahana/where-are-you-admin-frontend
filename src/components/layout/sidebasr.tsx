@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -7,19 +7,19 @@ import {
     LayoutDashboard,
     Bus,
     Users,
-    Map,
     UserCircle,
     Bell,
     Settings,
     X,
+    Route,
 } from "lucide-react";
 
 const navItems = [
     { label: "Dashboard", icon: LayoutDashboard, href: "/Dashboard" },
-    { label: "Bus Management", icon: Bus, href: "/Dashboard/buses" },
-    { label: "Live Tracking", icon: UserCircle, href: "/Dashboard/live-tracking" },
-    { label: "Route Planning", icon: Map, href: "/Dashboard/route-planning" },
-    { label: "Driver Registry", icon: Users, href: "/Dashboard/drivers" },
+    { label: "Buses", icon: Bus, href: "/buses" },
+    { label: "Drivers", icon: UserCircle, href: "/drivers" },
+    { label: "Route Planning", icon: Route, href: "/route-management" },
+    { label: "Users", icon: Users, href: "/users" },
 ];
 
 interface SidebarProps {
@@ -46,12 +46,10 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                     "fixed lg:relative z-30 lg:z-auto inset-y-0 left-0",
                     "h-full bg-white border-r border-gray-100 flex flex-col",
                     "transition-all duration-300 ease-in-out",
-                    // Mobile: slide in/out
                     "w-65",
                     isOpen
                         ? "translate-x-0 shadow-2xl lg:shadow-none"
                         : "-translate-x-full lg:translate-x-0",
-                    // Desktop: collapse to icon-only
                     isOpen ? "lg:w-65" : "lg:w-17"
                 )}
             >
@@ -68,7 +66,6 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                     >
                         BusTrack Pro
                     </span>
-                    {/* Close button — mobile only */}
                     <button
                         onClick={onClose}
                         className="ml-auto lg:hidden w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-gray-400 transition-colors"
@@ -80,40 +77,37 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                 {/* Nav */}
                 <nav className="flex-1 px-2 py-4 space-y-1 overflow-y-auto">
                     {navItems.map(({ label, icon: Icon, href }) => {
-                        const active =
-                            href === "/Dashboard"
-                                ? pathname === href
-                                : pathname?.startsWith(href);
-
+                        const active = pathname === href || pathname.startsWith(href + "/");
                         return (
-                        <Link
-                            key={label}
-                            href={href}
-                            title={!isOpen ? label : undefined}
-                            className={cn(
-                                "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-colors",
-                                active
-                                    ? "bg-blue-50 text-blue-700 font-semibold"
-                                    : "text-gray-600 hover:bg-gray-50 hover:text-gray-900 font-medium",
-                                !isOpen && "justify-center px-0"
-                            )}
-                        >
-                            <Icon
+                            <Link
+                                key={label}
+                                href={href}
+                                title={!isOpen ? label : undefined}
                                 className={cn(
-                                    "w-5 h-5 shrink-0",
-                                    active ? "text-blue-600" : "text-gray-400"
-                                )}
-                            />
-                            <span
-                                className={cn(
-                                    "whitespace-nowrap transition-all duration-200",
-                                    isOpen ? "opacity-100 w-auto" : "opacity-0 w-0 overflow-hidden"
+                                    "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-colors",
+                                    active
+                                        ? "bg-blue-50 text-blue-700 font-semibold"
+                                        : "text-gray-600 hover:bg-gray-50 hover:text-gray-900 font-medium",
+                                    !isOpen && "justify-center px-0"
                                 )}
                             >
-                                {label}
-                            </span>
-                        </Link>
-                    )})}
+                                <Icon
+                                    className={cn(
+                                        "w-5 h-5 shrink-0",
+                                        active ? "text-blue-600" : "text-gray-400"
+                                    )}
+                                />
+                                <span
+                                    className={cn(
+                                        "whitespace-nowrap transition-all duration-200",
+                                        isOpen ? "opacity-100 w-auto" : "opacity-0 w-0 overflow-hidden"
+                                    )}
+                                >
+                                    {label}
+                                </span>
+                            </Link>
+                        );
+                    })}
 
                     {/* System section */}
                     <div className="pt-4 pb-1">

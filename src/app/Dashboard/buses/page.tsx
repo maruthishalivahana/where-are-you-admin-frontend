@@ -1,7 +1,7 @@
 "use client"
 
 import { useMemo, useState, useEffect } from "react"
-import { Bell, Plus } from "lucide-react"
+import { Plus } from "lucide-react"
 import axios from "axios"
 
 import { AddBusDialog } from "@/components/buses/add-bus-dialog"
@@ -236,18 +236,6 @@ export default function BusesPage() {
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <Header
           onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
-          searchPlaceholder="Search by plate number, driver, or route..."
-          rightContent={
-            <>
-              <button
-                type="button"
-                className="flex size-9 items-center justify-center rounded-xl bg-gray-100 text-gray-500 transition-colors hover:bg-gray-200"
-                aria-label="Notifications"
-              >
-                <Bell className="size-4" />
-              </button>
-            </>
-          }
         />
 
         <main className="flex-1 space-y-6 overflow-y-auto p-6">
