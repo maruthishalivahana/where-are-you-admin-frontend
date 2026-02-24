@@ -1,7 +1,10 @@
 import axios from "axios";
 
+// Use env base URL when provided; default to relative so browser origin/proxy rewrites are used
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+
 const api = axios.create({
-    baseURL: "http://localhost:3000",
+    baseURL: API_BASE_URL,
 });
 
 // Attach JWT token to every request
@@ -13,6 +16,33 @@ api.interceptors.request.use((config) => {
     }
     return config;
 });
+
+// Globally handle auth failures: clear stale tokens and send user back to login
+api.interceptors.response.use(
+    (response) => response,
+    (error) => {
+        const status = error?.response?.status;
+        const message: string | undefined = error?.response?.data?.message;
+        const isAuthError =
+            status === 401 &&
+            typeof window !== "undefined" &&
+            (message?.toLowerCase().includes("invalid") ||
+                message?.toLowerCase().includes("expired") ||
+                message?.toLowerCase().includes("unauthorized"));
+
+        if (isAuthError) {
+            localStorage.removeItem("token");
+            localStorage.removeItem("admin_user");
+
+            // Avoid redirect loop if already on the login page
+            if (!window.location.pathname.startsWith("/login")) {
+                window.location.href = "/login";
+            }
+        }
+
+        return Promise.reject(error);
+    }
+);
 
 // ─── Auth ──────────────────────────────────────────────────────────────────
 

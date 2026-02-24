@@ -1,7 +1,7 @@
 "use client"
 
 import { useMemo, useState, useEffect, useCallback } from "react"
-import { Plus, AlertCircle } from "lucide-react"
+import { Plus, AlertCircle, CheckCircle } from "lucide-react"
 
 import { AddBusDialog } from "@/components/buses/add-bus-dialog"
 import { AssignDriverDialog } from "@/components/buses/assign-driver-dialog"
@@ -23,6 +23,11 @@ import {
   type Driver
 } from "@/services/api"
 
+interface Toast {
+  type: "success" | "error"
+  message: string
+}
+
 interface BusWithDriverName extends BusResponse {
   driverName?: string
   routeName?: string
@@ -34,6 +39,7 @@ export default function BusesPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
+  const [toast, setToast] = useState<Toast | null>(null)
 
   const [routes, setRoutes] = useState<Route[]>([])
   const [drivers, setDrivers] = useState<Driver[]>([])
@@ -83,7 +89,7 @@ export default function BusesPage() {
       setDrivers(driversData)
     } catch (err) {
       console.error("Failed to fetch data:", err)
-      setError("Failed to fetch buses. Please try again.")
+      showToast("error", "Failed to fetch buses. Please try again.")
     } finally {
       setLoading(false)
     }
@@ -97,6 +103,11 @@ export default function BusesPage() {
   const showError = (message: string) => {
     setError(message)
     setTimeout(() => setError(null), 3000)
+  }
+
+  const showToast = (type: Toast["type"], message: string) => {
+    setToast({ type, message })
+    setTimeout(() => setToast(null), 3500)
   }
 
   const filteredBuses = useMemo(() => {
@@ -187,6 +198,22 @@ export default function BusesPage() {
   return (
     <>
       <Header onToggleSidebar={() => { }} />
+
+      {/* Toast */}
+      {toast && (
+        <div
+          className={`fixed bottom-5 right-5 z-50 flex items-center gap-2.5 px-4 py-3 rounded-xl shadow-lg text-sm font-medium transition-all
+          ${toast.type === "success"
+              ? "bg-green-50 border border-green-200 text-green-800"
+              : "bg-red-50 border border-red-200 text-red-800"
+            }`}
+        >
+          {toast.type === "success"
+            ? <CheckCircle className="w-4 h-4 text-green-600 shrink-0" />
+            : <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />}
+          {toast.message}
+        </div>
+      )}
 
       <main className="flex-1 overflow-y-auto p-6 space-y-6">
         {/* Messages */}
