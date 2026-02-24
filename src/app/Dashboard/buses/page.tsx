@@ -28,10 +28,51 @@ interface Toast {
   message: string
 }
 
-interface BusWithDriverName extends BusResponse {
+interface BusWithDriverName extends Bus {
   driverName?: string
-  routeName?: string
-  id?: string
+  createdAt?: string
+  updatedAt?: string
+}
+
+const extractList = <T,>(input: unknown, keys: string[]): T[] => {
+  // If it's already an array, just return it
+  if (Array.isArray(input)) return input as T[]
+
+  const seen = new Set<unknown>()
+  const queue: unknown[] = []
+  if (input && typeof input === "object") queue.push(input)
+
+  while (queue.length) {
+    const current = queue.shift()
+    if (!current || typeof current !== "object" || seen.has(current)) continue
+    seen.add(current)
+
+    const obj = current as Record<string, unknown>
+
+    // Prefer explicit keys first
+    for (const key of keys) {
+      const value = obj[key]
+      if (Array.isArray(value)) return value as T[]
+      if (value && typeof value === "object") queue.push(value)
+    }
+
+    // If nothing found, enqueue any object values to search breadth-first (shallow recursion guard by Set)
+    for (const value of Object.values(obj)) {
+      if (Array.isArray(value)) return value as T[]
+      if (value && typeof value === "object") queue.push(value)
+    }
+  }
+
+  return []
+}
+
+const getErrorMessage = (err: unknown, fallback: string) => {
+  if (err && typeof err === "object" && "response" in err) {
+    const maybe = err as { response?: { data?: { message?: unknown } } }
+    const msg = maybe.response?.data?.message
+    if (typeof msg === "string" && msg.trim()) return msg
+  }
+  return fallback
 }
 
 export default function BusesPage() {
@@ -47,7 +88,6 @@ export default function BusesPage() {
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false)
   const [isAssignDriverDialogOpen, setIsAssignDriverDialogOpen] = useState(false)
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
-  const [isViewDialogOpen, setIsViewDialogOpen] = useState(false)
 
   const [routeFilter, setRouteFilter] = useState("All Routes")
   const [statusFilter, setStatusFilter] = useState("All Status")
@@ -55,45 +95,48 @@ export default function BusesPage() {
   const [selectedBus, setSelectedBus] = useState<BusWithDriverName | null>(null)
 
   // Fetch initial data
-  useEffect(() => {
-    fetchAllData()
-  }, [])
+  const fetchAllData = useCallback(async () => {
+    setLoading(true)
+    setError(null)
 
-  const fetchAllData = async () => {
     try {
-      setLoading(true)
-      setError(null)
-
-      const [busesRes, routesRes, driversRes] = await Promise.all([
+      const [busesRes, routesRes, driversRes] = await Promise.allSettled([
         getBuses(),
         getRoutes(),
-        getDrivers()
+        getDrivers(),
       ])
 
-      // Extract buses data
-      const busesData = (Array.isArray(busesRes.data)
-        ? busesRes.data
-        : ((busesRes.data as any).buses || (busesRes.data as any).data || [])) as BusResponse[]
-      setBuses(busesData)
+      if (busesRes.status === "fulfilled") {
+        const busesData = extractList<BusResponse>(busesRes.value.data, ["buses", "data"])
+        setBuses(busesData)
+      } else {
+        showToast("error", getErrorMessage(busesRes.reason, "Failed to fetch buses."))
+      }
 
-      // Extract routes data
-      const routesData = (Array.isArray(routesRes.data)
-        ? routesRes.data
-        : ((routesRes.data as any).routes || (routesRes.data as any).data || [])) as Route[]
-      setRoutes(routesData)
+      if (routesRes.status === "fulfilled") {
+        const routesData = extractList<Route>(routesRes.value.data, ["routes", "data"])
+        setRoutes(routesData)
+      }
 
-      // Extract drivers data
-      const driversData = (Array.isArray(driversRes.data)
-        ? driversRes.data
-        : ((driversRes.data as any).drivers || (driversRes.data as any).data || [])) as Driver[]
-      setDrivers(driversData)
+      if (driversRes.status === "fulfilled") {
+        const driversData = extractList<Driver>(driversRes.value.data, ["drivers", "data"])
+        setDrivers(driversData)
+      } else {
+        // Drivers are optional for showing buses; degrade gracefully
+        showToast("error", "Drivers unavailable (404). You can still view buses.")
+        setDrivers([])
+      }
     } catch (err) {
       console.error("Failed to fetch data:", err)
-      showToast("error", "Failed to fetch buses. Please try again.")
+      showToast("error", getErrorMessage(err, "Failed to fetch buses. Please try again."))
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    fetchAllData()
+  }, [fetchAllData])
 
   const showSuccess = (message: string) => {
     setSuccessMessage(message)
@@ -130,8 +173,8 @@ export default function BusesPage() {
       setBuses(prev => [newBus, ...prev])
       setIsAddDialogOpen(false)
       showSuccess("Bus created successfully!")
-    } catch (err: any) {
-      showError(err.response?.data?.message || "Failed to create bus")
+    } catch (err: unknown) {
+      showError(getErrorMessage(err, "Failed to create bus"))
     } finally {
       setLoading(false)
     }
@@ -153,8 +196,8 @@ export default function BusesPage() {
       setSelectedBus(null)
       setIsAssignDriverDialogOpen(false)
       showSuccess("Driver assigned successfully!")
-    } catch (err: any) {
-      showError(err.response?.data?.message || "Failed to assign driver")
+    } catch (err: unknown) {
+      showError(getErrorMessage(err, "Failed to assign driver"))
     } finally {
       setLoading(false)
     }
@@ -172,21 +215,21 @@ export default function BusesPage() {
       setSelectedBus(null)
       setIsDeleteDialogOpen(false)
       showSuccess("Bus deleted successfully!")
-    } catch (err: any) {
-      showError(err.response?.data?.message || "Failed to delete bus")
+    } catch (err: unknown) {
+      showError(getErrorMessage(err, "Failed to delete bus"))
     } finally {
       setLoading(false)
     }
   }, [selectedBus])
 
-  const handleViewBus = useCallback(async (bus: any) => {
+  const handleViewBus = useCallback(async (bus: BusWithDriverName) => {
     try {
       const busId = bus._id || bus.id || ""
       const response = await getBusById(busId)
       setSelectedBus(response.data.bus as BusWithDriverName)
-      setIsViewDialogOpen(true)
-    } catch (err: any) {
-      showError("Failed to fetch bus details")
+      showToast("success", "Bus details loaded")
+    } catch (err: unknown) {
+      showToast("error", getErrorMessage(err, "Failed to fetch bus details"))
     }
   }, [])
 
