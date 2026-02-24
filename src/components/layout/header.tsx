@@ -1,15 +1,17 @@
 "use client";
 
 import { Search, HelpCircle, MessageSquare, ChevronDown, Menu } from "lucide-react";
-import { useSidebar } from "@/components/layout/sidebar-context";
 
-export function Header() {
-    const { toggle } = useSidebar();
+interface HeaderProps {
+    onToggleSidebar: () => void;
+}
+
+export function Header({ onToggleSidebar }: HeaderProps) {
     return (
         <header className="h-16 bg-white border-b border-gray-100 flex items-center px-4 gap-3 shrink-0 sticky top-0 z-10">
             {/* Hamburger toggle */}
             <button
-                onClick={toggle}
+                onClick={onToggleSidebar}
                 className="w-9 h-9 rounded-xl bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors shrink-0"
                 aria-label="Toggle sidebar"
             >

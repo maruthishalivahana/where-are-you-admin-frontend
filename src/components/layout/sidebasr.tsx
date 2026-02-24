@@ -1,27 +1,23 @@
 ﻿"use client";
 
-import { cn } from "@/lib/utils";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useAuth } from "@/context/AuthContext";
+import { cn } from "@/lib/utils";
 import {
     LayoutDashboard,
     Bus,
-    Users,
-    UserCircle,
     Bell,
     Settings,
     X,
     Route,
     LogOut,
 } from "lucide-react";
+import { useAuth } from "@/context/AuthContext";
 
 const navItems = [
     { label: "Dashboard", icon: LayoutDashboard, href: "/Dashboard" },
-    { label: "Buses", icon: Bus, href: "/buses" },
-    { label: "Drivers", icon: UserCircle, href: "/drivers" },
+    { label: "Buses", icon: Bus, href: "/Dashboard/buses" },
     { label: "Route Planning", icon: Route, href: "/route-management" },
-    { label: "Users", icon: Users, href: "/users" },
 ];
 
 interface SidebarProps {
@@ -68,7 +64,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                             isOpen ? "opacity-100 w-auto" : "opacity-0 w-0 overflow-hidden"
                         )}
                     >
-                        CityTrack
+                        BusTrack Pro
                     </span>
                     <button
                         onClick={onClose}
