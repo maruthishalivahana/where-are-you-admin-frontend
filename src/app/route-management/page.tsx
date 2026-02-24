@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import {
     GoogleMap,
     useJsApiLoader,
     MarkerF,
     DirectionsRenderer,
+    Polyline,
 } from "@react-google-maps/api";
 import {
     Plus,
@@ -16,8 +17,6 @@ import {
     CheckCircle,
     Navigation,
     Route,
-    ChevronDown,
-    ChevronUp,
     Milestone,
 } from "lucide-react";
 import { RouteManagementHeader } from "@/components/route-management/route-header";
@@ -34,7 +33,7 @@ import {
 } from "@/services/api";
 
 const MAP_CONTAINER_STYLE = { width: "100%", height: "100%" };
-const DEFAULT_CENTER = { lat: 6.5244, lng: 3.3792 }; // Lagos, Nigeria
+const DEFAULT_CENTER = { lat: 17.385, lng: 78.4867 }; // Hyderabad, India
 // Must be a stable reference outside the component to prevent useJsApiLoader re-init
 const LIBRARIES: ("places" | "geometry")[] = ["places", "geometry"];
 
@@ -44,6 +43,15 @@ interface Toast {
     type: "success" | "error";
     message: string;
 }
+
+const toNumber = (value: unknown): number | null => {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed)) return parsed;
+    }
+    return null;
+};
 
 export default function RouteManagementPage() {
     const { isLoaded, loadError } = useJsApiLoader({
@@ -74,6 +82,7 @@ export default function RouteManagementPage() {
     const [addingStop, setAddingStop] = useState(false);
     const [routeStops, setRouteStops] = useState<Record<string, StopType[]>>({});
     const [deletingStopId, setDeletingStopId] = useState<string | null>(null);
+    const [mapRef, setMapRef] = useState<google.maps.Map | null>(null);
 
     // ─── Helpers ───────────────────────────────────────────────────────────
     const showToast = (type: Toast["type"], message: string) => {
@@ -84,11 +93,27 @@ export default function RouteManagementPage() {
     // ─── Load routes ───────────────────────────────────────────────────────
     const normalizeRoute = (r: RouteType): RouteType => ({
         ...r,
-        _id: r._id || (r as any).id, // Handle both _id (frontend) and id (backend response)
-        startLat: r.startLat ?? r.startLocation?.lat ?? 0,
-        startLng: r.startLng ?? r.startLocation?.lng ?? 0,
-        endLat: r.endLat ?? r.endLocation?.lat ?? 0,
-        endLng: r.endLng ?? r.endLocation?.lng ?? 0,
+        _id: r._id || (r as RouteType & { id?: string }).id || "",
+        startLat:
+            toNumber(r.startLat) ??
+            toNumber(r.startLocation?.lat) ??
+            toNumber((r.startLocation as unknown as { latitude?: number })?.latitude) ??
+            0,
+        startLng:
+            toNumber(r.startLng) ??
+            toNumber(r.startLocation?.lng) ??
+            toNumber((r.startLocation as unknown as { longitude?: number })?.longitude) ??
+            0,
+        endLat:
+            toNumber(r.endLat) ??
+            toNumber(r.endLocation?.lat) ??
+            toNumber((r.endLocation as unknown as { latitude?: number })?.latitude) ??
+            0,
+        endLng:
+            toNumber(r.endLng) ??
+            toNumber(r.endLocation?.lng) ??
+            toNumber((r.endLocation as unknown as { longitude?: number })?.longitude) ??
+            0,
     });
 
     const fetchRoutes = useCallback(async () => {
@@ -297,6 +322,37 @@ export default function RouteManagementPage() {
     };
 
     const mapCursor = markerMode ? "crosshair" : "grab";
+    const selectedRoute = routes.find((r) => r._id === selectedRouteId) ?? null;
+    const selectedStops = useMemo(
+        () => (selectedRouteId
+            ? [...(routeStops[selectedRouteId] ?? [])].sort((a, b) => a.sequenceOrder - b.sequenceOrder)
+            : []),
+        [selectedRouteId, routeStops]
+    );
+    const selectedRoutePath = useMemo(() => {
+        if (!selectedRoute) return [] as { lat: number; lng: number }[];
+        const path: { lat: number; lng: number }[] = [
+            { lat: selectedRoute.startLat, lng: selectedRoute.startLng },
+            ...selectedStops.map((stop) => ({ lat: stop.latitude, lng: stop.longitude })),
+            { lat: selectedRoute.endLat, lng: selectedRoute.endLng },
+        ];
+        return path.filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng));
+    }, [selectedRoute, selectedStops]);
+
+    useEffect(() => {
+        if (!isLoaded || !mapRef || !selectedRoute) return;
+
+        const bounds = new google.maps.LatLngBounds();
+        bounds.extend({ lat: selectedRoute.startLat, lng: selectedRoute.startLng });
+        bounds.extend({ lat: selectedRoute.endLat, lng: selectedRoute.endLng });
+        selectedStops.forEach((stop) => {
+            bounds.extend({ lat: stop.latitude, lng: stop.longitude });
+        });
+
+        if (!bounds.isEmpty()) {
+            mapRef.fitBounds(bounds, 60);
+        }
+    }, [isLoaded, mapRef, selectedRoute, selectedStops]);
 
     return (
         <div className="flex flex-col h-full overflow-hidden">
@@ -320,7 +376,7 @@ export default function RouteManagementPage() {
 
             <div className="flex-1 flex overflow-hidden">
                 {/* ── Left panel ── */}
-                <div className="w-full lg:w-96 xl:w-105 flex flex-col border-r border-gray-100 overflow-y-auto bg-white shrink-0">
+                <div className="w-full lg:w-96 xl:w-md flex flex-col border-r border-gray-100 overflow-y-auto bg-white shrink-0">
                     {/* Create form */}
                     <div className="p-5 border-b border-gray-100">
                         <h2 className="text-base font-semibold text-gray-900 mb-4 flex items-center gap-2">
@@ -425,10 +481,20 @@ export default function RouteManagementPage() {
                                 {routes.map((route) => (
                                     <div
                                         key={route._id}
-                                        className={`rounded-xl border transition-all bg-white ${selectedRouteId === route._id
+                                        className={`rounded-xl border transition-all bg-white cursor-pointer ${selectedRouteId === route._id
                                             ? "border-blue-300 shadow-sm"
                                             : "border-gray-100 hover:border-blue-200"
                                             }`}
+                                        onClick={() => {
+                                            const newSelected = selectedRouteId === route._id ? null : route._id;
+                                            setSelectedRouteId(newSelected);
+                                            setStopLocation(null);
+                                            setStopName("");
+                                            setMarkerMode(null);
+                                            if (newSelected && (!routeStops[newSelected] || routeStops[newSelected].length === 0)) {
+                                                loadStopsForRoute(newSelected);
+                                            }
+                                        }}
                                     >
                                         {/* Route header row */}
                                         <div className="flex items-start justify-between p-3.5">
@@ -450,33 +516,21 @@ export default function RouteManagementPage() {
                                                 </div>
                                             </div>
                                             <div className="flex items-center gap-1 shrink-0">
-                                                {/* Manage stops toggle */}
-                                                <button
-                                                    onClick={() => {
-                                                        const newSelected = selectedRouteId === route._id ? null : route._id;
-                                                        setSelectedRouteId(newSelected);
-                                                        setStopLocation(null);
-                                                        setStopName("");
-                                                        setMarkerMode(null);
-                                                        if (newSelected && (!routeStops[newSelected] || routeStops[newSelected].length === 0)) {
-                                                            loadStopsForRoute(newSelected);
-                                                        }
-                                                    }}
+                                                <span
                                                     className={`text-xs font-semibold px-2 py-1 rounded-lg transition-colors flex items-center gap-1 ${selectedRouteId === route._id
                                                         ? "bg-blue-600 text-white"
-                                                        : "text-blue-600 hover:bg-blue-50"
+                                                        : "text-blue-600 bg-blue-50"
                                                         }`}
-                                                    title="Manage stops"
                                                 >
                                                     <Milestone className="w-3.5 h-3.5" />
-                                                    <span>Stops</span>
-                                                    {selectedRouteId === route._id
-                                                        ? <ChevronUp className="w-3 h-3" />
-                                                        : <ChevronDown className="w-3 h-3" />}
-                                                </button>
+                                                    {selectedRouteId === route._id ? "Selected" : "Select"}
+                                                </span>
                                                 {/* Delete */}
                                                 <button
-                                                    onClick={() => handleDelete(route._id, route.name)}
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        handleDelete(route._id, route.name);
+                                                    }}
                                                     disabled={deletingId === route._id}
                                                     className="w-8 h-8 rounded-lg flex items-center justify-center text-gray-300 hover:text-red-500 hover:bg-red-50 transition-all"
                                                     title="Delete route"
@@ -488,96 +542,6 @@ export default function RouteManagementPage() {
                                             </div>
                                         </div>
 
-                                        {/* Stops panel */}
-                                        {selectedRouteId === route._id && (
-                                            <div className="border-t border-gray-100 px-3.5 pb-4 pt-3 space-y-3">
-                                                {/* Add stop form */}
-                                                <form onSubmit={handleAddStop} className="space-y-2 bg-blue-50 border border-blue-100 rounded-xl p-3">
-                                                    <p className="text-xs font-semibold text-gray-700 uppercase tracking-wide">Add New Stop</p>
-                                                    <input
-                                                        type="text"
-                                                        required
-                                                        placeholder="Stop name (e.g. Central Station)"
-                                                        value={stopName}
-                                                        onChange={(e) => setStopName(e.target.value)}
-                                                        className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-                                                    />
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => setMarkerMode("stop")}
-                                                        className={`w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border transition-all ${markerMode === "stop"
-                                                            ? "bg-blue-600 border-blue-600 text-white"
-                                                            : stopLocation
-                                                                ? "bg-blue-600 border-blue-600 text-white"
-                                                                : "bg-white border-blue-200 text-blue-600 hover:bg-blue-100"
-                                                            }`}
-                                                    >
-                                                        <MapPin className="w-3.5 h-3.5" />
-                                                        {markerMode === "stop"
-                                                            ? "Place on map…"
-                                                            : stopLocation
-                                                                ? `✓ Placed`
-                                                                : "Click map"}
-                                                    </button>
-                                                    <button
-                                                        type="submit"
-                                                        disabled={addingStop || !stopLocation}
-                                                        className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-2 rounded-lg text-xs transition-colors"
-                                                    >
-                                                        {addingStop
-                                                            ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Adding…</>
-                                                            : <><Plus className="w-3.5 h-3.5" />Add Stop</>}
-                                                    </button>
-                                                </form>
-
-                                                {/* Existing stops list */}
-                                                {(routeStops[route._id] ?? []).length > 0 && (
-                                                    <div className="space-y-2">
-                                                        <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Stops on Route ({routeStops[route._id].length})</p>
-                                                        <div className="space-y-0 relative">
-                                                            {routeStops[route._id]
-                                                                .sort((a, b) => a.sequenceOrder - b.sequenceOrder)
-                                                                .map((stop, idx, arr) => (
-                                                                    <div key={stop.id} className="relative">
-                                                                        {/* Timeline connector */}
-                                                                        {idx < arr.length - 1 && (
-                                                                            <div className="absolute left-4 top-8 w-0.5 h-8 bg-linear-to-b from-blue-300 to-blue-100" />
-                                                                        )}
-                                                                        {/* Stop item */}
-                                                                        <div className="flex items-start gap-3 relative">
-                                                                            {/* Stop number circle */}
-                                                                            <div className="w-8 h-8 rounded-full bg-blue-600 border-2 border-white text-white flex items-center justify-center text-xs font-bold mt-0.5 shrink-0 shadow-sm">
-                                                                                {stop.sequenceOrder}
-                                                                            </div>
-                                                                            {/* Stop details */}
-                                                                            <div className="min-w-0 flex-1 p-2 bg-blue-50 border border-blue-100 rounded-lg">
-                                                                                <p className="text-sm font-semibold text-gray-900 truncate">{stop.name}</p>
-                                                                                <p className="text-xs text-gray-500 mt-0.5">
-                                                                                    {stop.latitude.toFixed(4)}, {stop.longitude.toFixed(4)}
-                                                                                </p>
-                                                                                {stop.radiusMeters && (
-                                                                                    <p className="text-xs text-gray-400 mt-0.5">Radius: {stop.radiusMeters}m</p>
-                                                                                )}
-                                                                            </div>
-                                                                            {/* Delete stop button */}
-                                                                            <button
-                                                                                onClick={() => handleDeleteStop(stop.id, stop.name)}
-                                                                                disabled={deletingStopId === stop.id}
-                                                                                className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center text-gray-300 hover:text-red-500 hover:bg-red-50 transition-all mt-0.5"
-                                                                                title="Delete stop"
-                                                                            >
-                                                                                {deletingStopId === stop.id
-                                                                                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                                                                    : <Trash2 className="w-3.5 h-3.5" />}
-                                                                            </button>
-                                                                        </div>
-                                                                    </div>
-                                                                ))}
-                                                        </div>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        )}
                                     </div>
                                 ))}
                             </div>
@@ -586,7 +550,19 @@ export default function RouteManagementPage() {
                 </div>
 
                 {/* ── Right panel: Map ── */}
-                <div className="hidden lg:flex flex-1 flex-col bg-gray-100 relative overflow-hidden">
+                <div className="hidden lg:flex flex-1 flex-col bg-gray-100 overflow-hidden p-4 gap-4">
+                    <div className="relative h-[42%] min-h-70 rounded-2xl border border-gray-200 bg-white overflow-hidden">
+                    <button
+                        type="button"
+                        onClick={() => {
+                            if (!mapRef) return;
+                            mapRef.panTo(DEFAULT_CENTER);
+                            mapRef.setZoom(11);
+                        }}
+                        className="absolute top-4 right-4 z-10 px-3 py-1.5 text-xs font-semibold rounded-lg border border-blue-200 bg-white text-blue-700 hover:bg-blue-50 transition-colors"
+                    >
+                        Recenter Hyderabad
+                    </button>
                     {markerMode && (
                         <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 bg-white shadow-lg rounded-xl px-4 py-2.5 text-sm font-semibold text-gray-800 flex items-center gap-2 border border-gray-200">
                             <MapPin className={`w-4 h-4 ${markerMode === "start" ? "text-green-600"
@@ -627,6 +603,7 @@ export default function RouteManagementPage() {
                             center={DEFAULT_CENTER}
                             zoom={12}
                             onClick={onMapClick}
+                            onLoad={setMapRef}
                             options={{
                                 zoomControl: true,
                                 mapTypeControl: false,
@@ -679,6 +656,17 @@ export default function RouteManagementPage() {
                                     }}
                                 />
                             )}
+                            {selectedRoutePath.length >= 2 && (
+                                <Polyline
+                                    path={selectedRoutePath}
+                                    options={{
+                                        strokeColor: "#1d4ed8",
+                                        strokeOpacity: 0.9,
+                                        strokeWeight: 4,
+                                        geodesic: true,
+                                    }}
+                                />
+                            )}
                             {routes.map((r) => (
                                 <MarkerF
                                     key={`${r._id}-s`}
@@ -715,7 +703,7 @@ export default function RouteManagementPage() {
                                     key={stop.id}
                                     position={{ lat: stop.latitude, lng: stop.longitude }}
                                     title={stop.name}
-                                    label={{ text: String(stop.sequenceOrder), color: "white", fontWeight: "bold", fontSize: "11px" }}
+                                    label={{ text: String(stop.sequenceOrder || 0), color: "white", fontWeight: "bold", fontSize: "11px" }}
                                     icon={{
                                         path: google.maps.SymbolPath.CIRCLE,
                                         scale: 10,
@@ -743,6 +731,104 @@ export default function RouteManagementPage() {
                             )}
                         </GoogleMap>
                     )}
+                    </div>
+
+                    <div className="flex-1 rounded-2xl border border-gray-200 bg-white overflow-hidden flex flex-col">
+                        <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+                            <h3 className="text-lg font-semibold text-gray-900">Stop Management</h3>
+                            {selectedRoute && (
+                                <span className="text-xs font-semibold px-2 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-100">
+                                    {selectedRoute.name}
+                                </span>
+                            )}
+                        </div>
+
+                        {!selectedRouteId ? (
+                            <div className="flex-1 flex items-center justify-center text-sm text-gray-400">
+                                Select a route from the left to manage stops.
+                            </div>
+                        ) : (
+                            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                                <form onSubmit={handleAddStop} className="space-y-2 bg-blue-50 border border-blue-100 rounded-xl p-2.5">
+                                    <p className="text-xs font-semibold text-gray-700 uppercase tracking-wide">Add New Stop</p>
+                                    <div className="grid grid-cols-12 gap-2">
+                                        <input
+                                            type="text"
+                                            required
+                                            placeholder="Stop name"
+                                            value={stopName}
+                                            onChange={(e) => setStopName(e.target.value)}
+                                            className="col-span-6 px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => setMarkerMode("stop")}
+                                            className={`col-span-3 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-semibold border transition-all ${markerMode === "stop"
+                                                ? "bg-blue-600 border-blue-600 text-white"
+                                                : stopLocation
+                                                    ? "bg-blue-600 border-blue-600 text-white"
+                                                    : "bg-white border-blue-200 text-blue-600 hover:bg-blue-100"
+                                                }`}
+                                        >
+                                            <MapPin className="w-3 h-3" />
+                                            {markerMode === "stop"
+                                                ? "Map..."
+                                                : stopLocation
+                                                    ? "Placed"
+                                                    : "Map"}
+                                        </button>
+                                        <button
+                                            type="submit"
+                                            disabled={addingStop || !stopLocation}
+                                            className="col-span-3 flex items-center justify-center gap-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-1.5 rounded-lg text-xs transition-colors"
+                                        >
+                                            {addingStop
+                                                ? <><Loader2 className="w-3 h-3 animate-spin" />Adding</>
+                                                : <><Plus className="w-3 h-3" />Add</>}
+                                        </button>
+                                    </div>
+                                </form>
+
+                                {selectedStops.length === 0 ? (
+                                    <div className="text-sm text-gray-400 px-1">No stops yet for this route.</div>
+                                ) : (
+                                    <div className="space-y-2">
+                                        <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Stops on Route ({selectedStops.length})</p>
+                                        <div className="overflow-x-auto pb-1">
+                                            <div className="flex items-center min-w-max">
+                                                {selectedStops.map((stop, idx) => (
+                                                    <div key={stop.id} className="flex items-center">
+                                                        <div className="relative w-44 p-2.5 rounded-lg border border-blue-100 bg-blue-50">
+                                                            <div className="inline-flex w-5 h-5 rounded-full bg-blue-600 text-white text-[10px] font-bold items-center justify-center mb-1">
+                                                                {stop.sequenceOrder || idx + 1}
+                                                            </div>
+                                                            <button
+                                                                onClick={() => handleDeleteStop(stop.id, stop.name)}
+                                                                disabled={deletingStopId === stop.id}
+                                                                className="absolute top-1 right-1 w-5 h-5 rounded-md flex items-center justify-center text-gray-300 hover:text-red-500 hover:bg-red-50 transition-all"
+                                                                title="Delete stop"
+                                                            >
+                                                                {deletingStopId === stop.id
+                                                                    ? <Loader2 className="w-3 h-3 animate-spin" />
+                                                                    : <Trash2 className="w-3 h-3" />}
+                                                            </button>
+                                                            <p className="text-xs font-semibold text-gray-900 truncate pr-4">{stop.name}</p>
+                                                            <p className="text-[11px] text-gray-500 mt-0.5 truncate">
+                                                                {stop.latitude.toFixed(4)}, {stop.longitude.toFixed(4)}
+                                                            </p>
+                                                        </div>
+                                                        {idx < selectedStops.length - 1 && (
+                                                            <div className="w-8 h-0.5 bg-blue-300 mx-1" />
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
                 </div>
             </div>
         </div>
