@@ -10,7 +10,6 @@ import { AssignRouteDialog } from "@/components/buses/assign-route-dialog"
 import { BusTable, type Bus } from "@/components/buses/bus-table"
 import { DeleteBusDialog } from "@/components/buses/delete-bus-dialog"
 import { Header } from "@/components/layout/header"
-import { Sidebar } from "@/components/layout/sidebasr"
 import { Button } from "@/components/ui/button"
 
 // Regex patterns for input validation
@@ -42,7 +41,6 @@ const demoBuses: Bus[] = [
 ]
 
 export default function BusesPage() {
-  const [sidebarOpen, setSidebarOpen] = useState(true)
   const [buses, setBuses] = useState<Bus[]>(demoBuses)
   const [loading, setLoading] = useState(false)
 
@@ -231,14 +229,12 @@ export default function BusesPage() {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-gray-50 font-sans">
-      <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <Header
-          onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
-        />
+    <>
+      <Header
+        onToggleSidebar={() => {}}
+      />
 
-        <main className="flex-1 space-y-6 overflow-y-auto p-6">
+      <main className="flex-1 space-y-6 overflow-y-auto p-6">
           <section className="flex items-start justify-between">
             <div>
               <h1 className="text-3xl font-semibold text-gray-900">Bus Fleet</h1>
@@ -284,7 +280,6 @@ export default function BusesPage() {
             }}
           />
         </main>
-      </div>
 
       <AddBusDialog
         open={isAddDialogOpen}
@@ -324,6 +319,6 @@ export default function BusesPage() {
         onOpenChange={setIsDeleteDialogOpen}
         onConfirm={handleDeleteBus}
       />
-    </div>
+    </>
   )
 }
