@@ -1,12 +1,11 @@
 "use client";
 
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import {
     GoogleMap,
     useJsApiLoader,
     MarkerF,
     DirectionsRenderer,
-    Polyline,
 } from "@react-google-maps/api";
 import {
     Plus,
@@ -22,14 +21,15 @@ import {
 import { RouteManagementHeader } from "@/components/route-management/route-header";
 import {
     getRoutes,
+    getRouteById,
     createRoute,
     deleteRoute,
     createStop,
-    getStops,
     deleteStop,
     Route as RouteType,
     Stop as StopType,
     LatLng,
+    RouteDetailResponse,
 } from "@/services/api";
 
 const MAP_CONTAINER_STYLE = { width: "100%", height: "100%" };
@@ -42,6 +42,14 @@ type MarkerMode = "start" | "end" | "stop" | null;
 interface Toast {
     type: "success" | "error";
     message: string;
+}
+
+type RoutePathSource = "api" | "fallback" | "none";
+
+interface RenderRouteResult {
+    source: RoutePathSource;
+    reason: string;
+    missingStopOrders?: number[];
 }
 
 const toNumber = (value: unknown): number | null => {
@@ -159,12 +167,367 @@ export default function RouteManagementPage() {
     const [routeStops, setRouteStops] = useState<Record<string, StopType[]>>({});
     const [deletingStopId, setDeletingStopId] = useState<string | null>(null);
     const [mapRef, setMapRef] = useState<google.maps.Map | null>(null);
+    const [routePathSource, setRoutePathSource] = useState<RoutePathSource>("none");
+    const [routePathIssue, setRoutePathIssue] = useState("");
+    const routePolyline = useRef<google.maps.Polyline[]>([]);
+    const stopMarkers = useRef<google.maps.Marker[]>([]);
 
     // ─── Helpers ───────────────────────────────────────────────────────────
     const showToast = (type: Toast["type"], message: string) => {
         setToast({ type, message });
         setTimeout(() => setToast(null), 3500);
     };
+
+    const clearRouteOverlays = useCallback(() => {
+        routePolyline.current.forEach((polyline) => polyline.setMap(null));
+        routePolyline.current = [];
+        stopMarkers.current.forEach((marker) => marker.setMap(null));
+        stopMarkers.current = [];
+        setRoutePathSource("none");
+        setRoutePathIssue("");
+    }, []);
+
+    const parseRouteDetail = useCallback((raw: unknown, routeId: string): RouteDetailResponse => {
+        const toRecord = (value: unknown): Record<string, unknown> | null => {
+            if (value && typeof value === "object" && !Array.isArray(value)) {
+                return value as Record<string, unknown>;
+            }
+            return null;
+        };
+
+        const root = toRecord(raw);
+        const rootData = toRecord(root?.data);
+        const rootResult = toRecord(root?.result);
+
+        const candidateObjects = [
+            toRecord(root?.route),
+            toRecord(root?.data),
+            toRecord(rootData?.route),
+            toRecord(rootData?.data),
+            toRecord(rootResult?.route),
+            root,
+        ].filter((obj): obj is Record<string, unknown> => Boolean(obj));
+
+        const detail = candidateObjects.find((obj) => {
+            return (
+                "stops" in obj ||
+                "polyline" in obj ||
+                "encodedPolyline" in obj ||
+                "routePolyline" in obj ||
+                "overviewPolyline" in obj ||
+                "overview_polyline" in obj
+            );
+        }) ?? {};
+
+        const polylineCandidates: unknown[] = [
+            detail.polyline,
+            detail.encodedPolyline,
+            detail.encoded_polyline,
+            detail.routePolyline,
+            detail.route_polyline,
+            detail.overviewPolyline,
+            detail.overview_polyline,
+            toRecord(detail.overviewPolyline)?.points,
+            toRecord(detail.overview_polyline)?.points,
+            toRecord(detail.geometry)?.polyline,
+            toRecord(detail.geometry)?.encodedPolyline,
+            toRecord(detail.path)?.polyline,
+            toRecord(detail.route)?.polyline,
+        ];
+
+        const encodedPolyline = polylineCandidates.find(
+            (value): value is string => typeof value === "string" && value.trim().length > 0
+        ) ?? "";
+
+        const rawStops =
+            (Array.isArray(detail.stops) ? detail.stops : null) ??
+            (Array.isArray(detail.routeStops) ? detail.routeStops : null) ??
+            (Array.isArray(detail.route_stops) ? detail.route_stops : null) ??
+            [];
+
+        const normalizedStops = rawStops
+            .map((stop, index) => {
+                const s = stop as {
+                    id?: unknown;
+                    _id?: unknown;
+                    name?: unknown;
+                    lat?: unknown;
+                    lng?: unknown;
+                    latitude?: unknown;
+                    longitude?: unknown;
+                    location?: { lat?: unknown; lng?: unknown; latitude?: unknown; longitude?: unknown };
+                    order?: unknown;
+                    sequenceOrder?: unknown;
+                };
+
+                const lat =
+                    toNumber(s.lat) ??
+                    toNumber(s.latitude) ??
+                    toNumber(s.location?.lat) ??
+                    toNumber(s.location?.latitude);
+                const lng =
+                    toNumber(s.lng) ??
+                    toNumber(s.longitude) ??
+                    toNumber(s.location?.lng) ??
+                    toNumber(s.location?.longitude);
+                if (lat === null || lng === null || !isValidCoordinate(lat, lng)) {
+                    return null;
+                }
+
+                return {
+                    id: String(s.id ?? s._id ?? `${routeId}-${index + 1}`),
+                    name: typeof s.name === "string" && s.name.trim() ? s.name : `Stop ${index + 1}`,
+                    lat,
+                    lng,
+                    order: toNumber(s.order) ?? toNumber(s.sequenceOrder) ?? index + 1,
+                };
+            })
+            .filter((stop): stop is NonNullable<typeof stop> => Boolean(stop));
+
+        return {
+            routeId: String(detail.routeId ?? detail._id ?? detail.id ?? routeId),
+            polyline: encodedPolyline,
+            stops: normalizedStops,
+        };
+    }, []);
+
+    const renderSelectedRouteOnMap = useCallback((detail: RouteDetailResponse): RenderRouteResult => {
+        if (!isLoaded || !mapRef) {
+            return { source: "none", reason: "map-not-ready" };
+        }
+
+        clearRouteOverlays();
+        const bounds = new google.maps.LatLngBounds();
+        const routeSummary = routes.find((route) => route._id === detail.routeId);
+        const orderedStops = detail.stops.slice().sort((a, b) => a.order - b.order);
+
+        const fallbackPath: google.maps.LatLngLiteral[] = [];
+        if (routeSummary && isValidCoordinate(routeSummary.startLat, routeSummary.startLng)) {
+            fallbackPath.push({ lat: routeSummary.startLat, lng: routeSummary.startLng });
+        }
+        orderedStops.forEach((stop) => {
+            fallbackPath.push({ lat: stop.lat, lng: stop.lng });
+        });
+        if (routeSummary && isValidCoordinate(routeSummary.endLat, routeSummary.endLng)) {
+            fallbackPath.push({ lat: routeSummary.endLat, lng: routeSummary.endLng });
+        }
+
+        let routePath: google.maps.LatLngLiteral[] = [];
+        let source: RoutePathSource = "none";
+        let reason = "no-drawable-path";
+        let missingStopOrders: number[] = [];
+
+        if (detail.polyline && google.maps.geometry?.encoding) {
+            try {
+                const decodedPath = google.maps.geometry.encoding.decodePath(detail.polyline);
+                if (decodedPath.length > 0) {
+                    routePath = decodedPath.map((point) => ({ lat: point.lat(), lng: point.lng() }));
+                    source = "api";
+                    reason = "api-polyline-used";
+                }
+            } catch (err) {
+                reason = "api-polyline-decode-failed";
+                console.error("Failed to decode selected route polyline:", err);
+            }
+        }
+
+        if (source === "api" && routePath.length >= 2 && orderedStops.length > 0 && google.maps.geometry?.poly) {
+            const pathPolyline = new google.maps.Polyline({ path: routePath });
+            const toleranceDegrees = 0.0018;
+
+            const missingStops = orderedStops.filter((stop) => {
+                const stopPoint = new google.maps.LatLng(stop.lat, stop.lng);
+                return !google.maps.geometry.poly.isLocationOnEdge(stopPoint, pathPolyline, toleranceDegrees);
+            });
+
+            if (missingStops.length > 0) {
+                missingStopOrders = missingStops.map((stop) => stop.order);
+                routePath = [];
+                source = "none";
+                reason = "api-polyline-misses-stops";
+            }
+
+            pathPolyline.setMap(null);
+        }
+
+        if (routePath.length < 2 && fallbackPath.length >= 2) {
+            routePath = fallbackPath;
+            source = "fallback";
+            if (reason === "no-drawable-path") {
+                reason = detail.polyline.trim().length === 0
+                    ? "api-missing-polyline"
+                    : "fallback-used";
+            }
+        }
+
+        if (routePath.length >= 2) {
+            const polyline = new google.maps.Polyline({
+                path: routePath,
+                geodesic: true,
+                strokeColor: "#1d4ed8",
+                strokeOpacity: 0.9,
+                strokeWeight: 4,
+                map: mapRef,
+            });
+            routePolyline.current = [polyline];
+            routePath.forEach((point) => bounds.extend(point));
+        }
+
+        const startMarkerPosition =
+            routeSummary && isValidCoordinate(routeSummary.startLat, routeSummary.startLng)
+                ? { lat: routeSummary.startLat, lng: routeSummary.startLng }
+                : routePath.length > 0
+                    ? routePath[0]
+                    : null;
+
+        const endMarkerPosition =
+            routeSummary && isValidCoordinate(routeSummary.endLat, routeSummary.endLng)
+                ? { lat: routeSummary.endLat, lng: routeSummary.endLng }
+                : routePath.length > 0
+                    ? routePath[routePath.length - 1]
+                    : null;
+
+        const markers: google.maps.Marker[] = [];
+
+        if (startMarkerPosition) {
+            markers.push(new google.maps.Marker({
+                map: mapRef,
+                position: startMarkerPosition,
+                title: "Route Start",
+                label: {
+                    text: "S",
+                    color: "white",
+                    fontWeight: "700",
+                },
+                icon: {
+                    path: google.maps.SymbolPath.CIRCLE,
+                    scale: 12,
+                    fillColor: "#16a34a",
+                    fillOpacity: 1,
+                    strokeColor: "#fff",
+                    strokeWeight: 2,
+                },
+            }));
+            bounds.extend(startMarkerPosition);
+        }
+
+        if (endMarkerPosition) {
+            markers.push(new google.maps.Marker({
+                map: mapRef,
+                position: endMarkerPosition,
+                title: "Route End",
+                label: {
+                    text: "E",
+                    color: "white",
+                    fontWeight: "700",
+                },
+                icon: {
+                    path: google.maps.SymbolPath.CIRCLE,
+                    scale: 12,
+                    fillColor: "#dc2626",
+                    fillOpacity: 1,
+                    strokeColor: "#fff",
+                    strokeWeight: 2,
+                },
+            }));
+            bounds.extend(endMarkerPosition);
+        }
+
+        orderedStops.forEach((stop) => {
+            markers.push(new google.maps.Marker({
+                map: mapRef,
+                position: { lat: stop.lat, lng: stop.lng },
+                title: stop.name,
+                label: {
+                    text: String(stop.order),
+                    color: "white",
+                    fontWeight: "700",
+                },
+                icon: {
+                    path: google.maps.SymbolPath.CIRCLE,
+                    scale: 10,
+                    fillColor: "#2563eb",
+                    fillOpacity: 1,
+                    strokeColor: "#fff",
+                    strokeWeight: 2,
+                },
+            }));
+            bounds.extend({ lat: stop.lat, lng: stop.lng });
+        });
+
+        stopMarkers.current = markers;
+
+        if (!bounds.isEmpty()) {
+            mapRef.fitBounds(bounds, 60);
+        }
+
+        setRoutePathSource(source);
+        return { source, reason, missingStopOrders };
+    }, [clearRouteOverlays, isLoaded, mapRef, routes]);
+
+    const fetchAndRenderSelectedRoute = useCallback(async (routeId: string) => {
+        try {
+            const response = await getRouteById(routeId);
+            const { data } = response;
+            const endpointUsed = response.config?.url ?? "unknown";
+            const detail = parseRouteDetail(data, routeId);
+
+            setRouteStops((prev) => ({
+                ...prev,
+                [routeId]: detail.stops
+                    .slice()
+                    .sort((a, b) => a.order - b.order)
+                    .map((stop) => ({
+                        id: stop.id ?? `${routeId}-${stop.order}`,
+                        routeId,
+                        name: stop.name,
+                        latitude: stop.lat,
+                        longitude: stop.lng,
+                        sequenceOrder: stop.order,
+                    })),
+            }));
+
+            const renderResult = renderSelectedRouteOnMap(detail);
+            const source = renderResult.source;
+
+            if (source === "api") {
+                setRoutePathIssue(`Using API polyline from ${endpointUsed}.`);
+            } else if (source === "fallback") {
+                if (renderResult.reason === "api-missing-polyline") {
+                    setRoutePathIssue(`Fallback active: ${endpointUsed} did not return a non-empty encoded polyline string.`);
+                } else if (renderResult.reason === "api-polyline-misses-stops") {
+                    const missed = (renderResult.missingStopOrders ?? []).join(", ");
+                    setRoutePathIssue(`Fallback active: ${endpointUsed} polyline does not pass via stop orders [${missed}].`);
+                } else if (renderResult.reason === "api-polyline-decode-failed") {
+                    setRoutePathIssue(`Fallback active: ${endpointUsed} returned polyline length ${detail.polyline.length}, but google decodePath could not decode it.`);
+                } else {
+                    setRoutePathIssue(`Fallback active: ${endpointUsed} API path was not usable for selected stops.`);
+                }
+            } else {
+                setRoutePathIssue(`No drawable path from ${endpointUsed}.`);
+            }
+
+            if (source === "fallback") {
+                const responseKeys = (data && typeof data === "object") ? Object.keys(data as Record<string, unknown>) : [];
+                console.warn("Route polyline fallback used. API payload did not provide a decodable encoded polyline.", {
+                    routeId,
+                    endpointUsed,
+                    responseKeys,
+                    parsedPolylineLength: detail.polyline.length,
+                    stopsCount: detail.stops.length,
+                    fallbackReason: renderResult.reason,
+                    missingStopOrders: renderResult.missingStopOrders,
+                });
+            }
+        } catch (err: unknown) {
+            clearRouteOverlays();
+            const msg =
+                (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
+                (err as Error)?.message ??
+                "Failed to load selected route.";
+            showToast("error", msg);
+        }
+    }, [clearRouteOverlays, parseRouteDetail, renderSelectedRouteOnMap]);
 
     // ─── Load routes ───────────────────────────────────────────────────────
     const normalizeRoute = (r: RouteType): RouteType => {
@@ -223,6 +586,12 @@ export default function RouteManagementPage() {
     useEffect(() => {
         fetchRoutes();
     }, [fetchRoutes]);
+
+    useEffect(() => {
+        return () => {
+            clearRouteOverlays();
+        };
+    }, [clearRouteOverlays]);
 
     // ─── Directions ────────────────────────────────────────────────────────
     useEffect(() => {
@@ -317,6 +686,11 @@ export default function RouteManagementPage() {
         try {
             await deleteRoute(id);
             setRoutes((prev) => prev.filter((r) => r._id !== id));
+            if (selectedRouteId === id) {
+                setSelectedRouteId(null);
+                clearRouteOverlays();
+                setRoutePathSource("none");
+            }
             showToast("success", `Route "${name}" deleted.`);
         } catch (err: unknown) {
             const msg =
@@ -354,6 +728,7 @@ export default function RouteManagementPage() {
             }));
             setStopName("");
             setStopLocation(null);
+            await fetchAndRenderSelectedRoute(selectedRouteId);
             showToast("success", `Stop “${stop.name}” added.`);
         } catch (err: unknown) {
             const errData = (err as { response?: { data?: unknown } })?.response?.data;
@@ -368,19 +743,6 @@ export default function RouteManagementPage() {
         }
     };
 
-    // ─── Load stops for selected route ─────────────────────────────────────
-    const loadStopsForRoute = useCallback(async (routeId: string) => {
-        try {
-            const { data } = await getStops(routeId);
-            setRouteStops((prev) => ({
-                ...prev,
-                [routeId]: data.stops ?? [],
-            }));
-        } catch (err: unknown) {
-            console.error("Failed to load stops:", err);
-        }
-    }, []);
-
     // ─── Delete stop ─────────────────────────────────────────────────────
     const handleDeleteStop = async (stopId: string, stopName: string) => {
         if (!confirm(`Delete stop "${stopName}"?`)) return;
@@ -394,6 +756,9 @@ export default function RouteManagementPage() {
                 }
                 return updated;
             });
+            if (selectedRouteId) {
+                await fetchAndRenderSelectedRoute(selectedRouteId);
+            }
             showToast("success", `Stop "${stopName}" deleted.`);
         } catch (err: unknown) {
             const msg =
@@ -414,46 +779,11 @@ export default function RouteManagementPage() {
             : []),
         [selectedRouteId, routeStops]
     );
-    const selectedRoutePath = useMemo(() => {
-        if (!selectedRoute) return [] as { lat: number; lng: number }[];
-        const stopPoints = selectedStops
-            .map((stop) => ({ lat: stop.latitude, lng: stop.longitude }))
-            .filter((point) => isValidCoordinate(point.lat, point.lng));
-
-        const startPoint = isValidCoordinate(selectedRoute.startLat, selectedRoute.startLng)
-            ? { lat: selectedRoute.startLat, lng: selectedRoute.startLng }
-            : stopPoints[0] ?? null;
-
-        const endPoint = isValidCoordinate(selectedRoute.endLat, selectedRoute.endLng)
-            ? { lat: selectedRoute.endLat, lng: selectedRoute.endLng }
-            : stopPoints[stopPoints.length - 1] ?? null;
-
-        if (!startPoint || !endPoint) return [];
-
-        const path: { lat: number; lng: number }[] = [
-            startPoint,
-            ...stopPoints,
-            endPoint,
-        ];
-        return path.filter((point) => isValidCoordinate(point.lat, point.lng));
-    }, [selectedRoute, selectedStops]);
 
     useEffect(() => {
-        if (!isLoaded || !mapRef || !selectedRoute) return;
-        if (!isValidCoordinate(selectedRoute.startLat, selectedRoute.startLng)) return;
-        if (!isValidCoordinate(selectedRoute.endLat, selectedRoute.endLng)) return;
-
-        const bounds = new google.maps.LatLngBounds();
-        bounds.extend({ lat: selectedRoute.startLat, lng: selectedRoute.startLng });
-        bounds.extend({ lat: selectedRoute.endLat, lng: selectedRoute.endLng });
-        selectedStops.forEach((stop) => {
-            bounds.extend({ lat: stop.latitude, lng: stop.longitude });
-        });
-
-        if (!bounds.isEmpty()) {
-            mapRef.fitBounds(bounds, 60);
-        }
-    }, [isLoaded, mapRef, selectedRoute, selectedStops]);
+        if (!selectedRouteId || !isLoaded || !mapRef) return;
+        void fetchAndRenderSelectedRoute(selectedRouteId);
+    }, [fetchAndRenderSelectedRoute, isLoaded, mapRef, selectedRouteId]);
 
     return (
         <div className="flex flex-col h-full overflow-hidden">
@@ -592,8 +922,9 @@ export default function RouteManagementPage() {
                                             setStopLocation(null);
                                             setStopName("");
                                             setMarkerMode(null);
-                                            if (newSelected && (!routeStops[newSelected] || routeStops[newSelected].length === 0)) {
-                                                loadStopsForRoute(newSelected);
+                                            if (!newSelected) {
+                                                clearRouteOverlays();
+                                                setRoutePathSource("none");
                                             }
                                         }}
                                     >
@@ -657,189 +988,143 @@ export default function RouteManagementPage() {
                 {/* ── Right panel: Map ── */}
                 <div className="hidden lg:flex flex-1 flex-col bg-gray-100 overflow-hidden p-4 gap-4">
                     <div className="relative h-[42%] min-h-70 rounded-2xl border border-gray-200 bg-white overflow-hidden">
-                    <button
-                        type="button"
-                        onClick={() => {
-                            if (!mapRef) return;
-                            mapRef.panTo(DEFAULT_CENTER);
-                            mapRef.setZoom(11);
-                        }}
-                        className="absolute top-4 right-4 z-10 px-3 py-1.5 text-xs font-semibold rounded-lg border border-blue-200 bg-white text-blue-700 hover:bg-blue-50 transition-colors"
-                    >
-                        Recenter Hyderabad
-                    </button>
-                    {markerMode && (
-                        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 bg-white shadow-lg rounded-xl px-4 py-2.5 text-sm font-semibold text-gray-800 flex items-center gap-2 border border-gray-200">
-                            <MapPin className={`w-4 h-4 ${markerMode === "start" ? "text-green-600"
-                                : markerMode === "stop" ? "text-blue-600"
-                                    : "text-red-500"
-                                }`} />
-                            {markerMode === "stop"
-                                ? "Click map to place stop"
-                                : `Click map to set ${markerMode === "start" ? "start" : "end"} location`}
-                        </div>
-                    )}
-
-                    {loadError && (
-                        <div className="flex-1 flex items-center justify-center p-6">
-                            <div className="text-center text-gray-500 max-w-sm">
-                                <AlertCircle className="w-10 h-10 mx-auto mb-3 text-red-400" />
-                                <p className="font-semibold text-gray-800 mb-1">Map failed to load</p>
-                                <p className="text-sm text-red-500 mb-3 bg-red-50 rounded-lg px-3 py-2 text-left wrap-break-word">
-                                    {loadError.message || String(loadError)}
-                                </p>
-                                <p className="text-xs text-gray-400">
-                                    Make sure both <strong>Maps JavaScript API</strong> and <strong>Directions API</strong> are enabled in your{" "}
-                                    <a href="https://console.cloud.google.com/apis/library" target="_blank" rel="noreferrer" className="text-blue-500 underline">Google Cloud Console</a>.
-                                </p>
-                            </div>
-                        </div>
-                    )}
-
-                    {!isLoaded && !loadError && (
-                        <div className="flex-1 flex items-center justify-center">
-                            <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
-                        </div>
-                    )}
-
-                    {isLoaded && !loadError && (
-                        <GoogleMap
-                            mapContainerStyle={MAP_CONTAINER_STYLE}
-                            center={DEFAULT_CENTER}
-                            zoom={12}
-                            onClick={onMapClick}
-                            onLoad={setMapRef}
-                            options={{
-                                zoomControl: true,
-                                mapTypeControl: false,
-                                streetViewControl: false,
-                                fullscreenControl: true,
-                                draggableCursor: mapCursor,
-                                styles: [
-                                    { featureType: "poi", elementType: "labels", stylers: [{ visibility: "off" }] },
-                                ],
+                        <button
+                            type="button"
+                            onClick={() => {
+                                if (!mapRef) return;
+                                mapRef.panTo(DEFAULT_CENTER);
+                                mapRef.setZoom(11);
                             }}
+                            className="absolute top-4 right-4 z-10 px-3 py-1.5 text-xs font-semibold rounded-lg border border-blue-200 bg-white text-blue-700 hover:bg-blue-50 transition-colors"
                         >
-                            {startLocation && (
-                                <MarkerF
-                                    position={startLocation}
-                                    label={{ text: "S", color: "white", fontWeight: "bold", fontSize: "12px" }}
-                                    icon={{
-                                        path: google.maps.SymbolPath.CIRCLE,
-                                        scale: 12,
-                                        fillColor: "#16a34a",
-                                        fillOpacity: 1,
-                                        strokeColor: "#fff",
-                                        strokeWeight: 2,
-                                    }}
-                                />
-                            )}
-                            {endLocation && (
-                                <MarkerF
-                                    position={endLocation}
-                                    label={{ text: "E", color: "white", fontWeight: "bold", fontSize: "12px" }}
-                                    icon={{
-                                        path: google.maps.SymbolPath.CIRCLE,
-                                        scale: 12,
-                                        fillColor: "#dc2626",
-                                        fillOpacity: 1,
-                                        strokeColor: "#fff",
-                                        strokeWeight: 2,
-                                    }}
-                                />
-                            )}
-                            {directions && (
-                                <DirectionsRenderer
-                                    directions={directions}
-                                    options={{
-                                        suppressMarkers: true,
-                                        polylineOptions: {
-                                            strokeColor: "#2563eb",
-                                            strokeWeight: 5,
-                                            strokeOpacity: 0.8,
-                                        },
-                                    }}
-                                />
-                            )}
-                            {selectedRoutePath.length >= 2 && (
-                                <Polyline
-                                    path={selectedRoutePath}
-                                    options={{
-                                        strokeColor: "#1d4ed8",
-                                        strokeOpacity: 0.9,
-                                        strokeWeight: 4,
-                                        geodesic: true,
-                                    }}
-                                />
-                            )}
-                            {routes.map((r) => (
-                                isValidCoordinate(r.startLat, r.startLng) ? (
+                            Recenter Hyderabad
+                        </button>
+                        {selectedRouteId && (
+                            <div className="absolute top-4 left-4 z-10 px-2.5 py-1 text-xs font-semibold rounded-lg border bg-white/95 max-w-[70%]">
+                                {routePathSource === "api" && (
+                                    <span className="text-green-700 border border-green-200 bg-green-50 px-2 py-1 rounded-md">Polyline source: API</span>
+                                )}
+                                {routePathSource === "fallback" && (
+                                    <span className="text-amber-700 border border-amber-200 bg-amber-50 px-2 py-1 rounded-md">Polyline source: fallback</span>
+                                )}
+                                {routePathSource === "none" && (
+                                    <span className="text-gray-600 border border-gray-200 bg-gray-50 px-2 py-1 rounded-md">Polyline source: unavailable</span>
+                                )}
+                                {routePathIssue && (
+                                    <p className="mt-1 text-[11px] leading-snug text-gray-600 wrap-break-word">{routePathIssue}</p>
+                                )}
+                            </div>
+                        )}
+                        {markerMode && (
+                            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 bg-white shadow-lg rounded-xl px-4 py-2.5 text-sm font-semibold text-gray-800 flex items-center gap-2 border border-gray-200">
+                                <MapPin className={`w-4 h-4 ${markerMode === "start" ? "text-green-600"
+                                    : markerMode === "stop" ? "text-blue-600"
+                                        : "text-red-500"
+                                    }`} />
+                                {markerMode === "stop"
+                                    ? "Click map to place stop"
+                                    : `Click map to set ${markerMode === "start" ? "start" : "end"} location`}
+                            </div>
+                        )}
+
+                        {loadError && (
+                            <div className="flex-1 flex items-center justify-center p-6">
+                                <div className="text-center text-gray-500 max-w-sm">
+                                    <AlertCircle className="w-10 h-10 mx-auto mb-3 text-red-400" />
+                                    <p className="font-semibold text-gray-800 mb-1">Map failed to load</p>
+                                    <p className="text-sm text-red-500 mb-3 bg-red-50 rounded-lg px-3 py-2 text-left wrap-break-word">
+                                        {loadError.message || String(loadError)}
+                                    </p>
+                                    <p className="text-xs text-gray-400">
+                                        Make sure both <strong>Maps JavaScript API</strong> and <strong>Directions API</strong> are enabled in your{" "}
+                                        <a href="https://console.cloud.google.com/apis/library" target="_blank" rel="noreferrer" className="text-blue-500 underline">Google Cloud Console</a>.
+                                    </p>
+                                </div>
+                            </div>
+                        )}
+
+                        {!isLoaded && !loadError && (
+                            <div className="flex-1 flex items-center justify-center">
+                                <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
+                            </div>
+                        )}
+
+                        {isLoaded && !loadError && (
+                            <GoogleMap
+                                mapContainerStyle={MAP_CONTAINER_STYLE}
+                                center={DEFAULT_CENTER}
+                                zoom={12}
+                                onClick={onMapClick}
+                                onLoad={setMapRef}
+                                options={{
+                                    zoomControl: true,
+                                    mapTypeControl: false,
+                                    streetViewControl: false,
+                                    fullscreenControl: true,
+                                    draggableCursor: mapCursor,
+                                    styles: [
+                                        { featureType: "poi", elementType: "labels", stylers: [{ visibility: "off" }] },
+                                    ],
+                                }}
+                            >
+                                {startLocation && (
                                     <MarkerF
-                                        key={`${r._id}-s`}
-                                        position={{ lat: r.startLat, lng: r.startLng }}
-                                        title={`${r.name} — Start`}
+                                        position={startLocation}
+                                        label={{ text: "S", color: "white", fontWeight: "bold", fontSize: "12px" }}
                                         icon={{
                                             path: google.maps.SymbolPath.CIRCLE,
-                                            scale: 7,
+                                            scale: 12,
                                             fillColor: "#16a34a",
-                                            fillOpacity: 0.55,
+                                            fillOpacity: 1,
                                             strokeColor: "#fff",
-                                            strokeWeight: 1.5,
+                                            strokeWeight: 2,
                                         }}
                                     />
-                                ) : null
-                            ))}
-                            {routes.map((r) => (
-                                isValidCoordinate(r.endLat, r.endLng) ? (
+                                )}
+                                {endLocation && (
                                     <MarkerF
-                                        key={`${r._id}-e`}
-                                        position={{ lat: r.endLat, lng: r.endLng }}
-                                        title={`${r.name} — End`}
+                                        position={endLocation}
+                                        label={{ text: "E", color: "white", fontWeight: "bold", fontSize: "12px" }}
                                         icon={{
                                             path: google.maps.SymbolPath.CIRCLE,
-                                            scale: 7,
+                                            scale: 12,
                                             fillColor: "#dc2626",
-                                            fillOpacity: 0.55,
+                                            fillOpacity: 1,
                                             strokeColor: "#fff",
-                                            strokeWeight: 1.5,
+                                            strokeWeight: 2,
                                         }}
                                     />
-                                ) : null
-                            ))}
-                            {/* Stop markers for selected route */}
-                            {selectedRouteId && (routeStops[selectedRouteId] ?? []).map((stop) => (
-                                <MarkerF
-                                    key={stop.id}
-                                    position={{ lat: stop.latitude, lng: stop.longitude }}
-                                    title={stop.name}
-                                    label={{ text: String(stop.sequenceOrder || 0), color: "white", fontWeight: "bold", fontSize: "11px" }}
-                                    icon={{
-                                        path: google.maps.SymbolPath.CIRCLE,
-                                        scale: 10,
-                                        fillColor: "#2563eb",
-                                        fillOpacity: 1,
-                                        strokeColor: "#fff",
-                                        strokeWeight: 2,
-                                    }}
-                                />
-                            ))}
-                            {/* Pending stop location (before form submit) */}
-                            {stopLocation && markerMode === null && selectedRouteId && (
-                                <MarkerF
-                                    position={stopLocation}
-                                    title="New stop (unsaved)"
-                                    icon={{
-                                        path: google.maps.SymbolPath.CIRCLE,
-                                        scale: 10,
-                                        fillColor: "#7c3aed",
-                                        fillOpacity: 0.85,
-                                        strokeColor: "#fff",
-                                        strokeWeight: 2,
-                                    }}
-                                />
-                            )}
-                        </GoogleMap>
-                    )}
+                                )}
+                                {directions && (
+                                    <DirectionsRenderer
+                                        directions={directions}
+                                        options={{
+                                            suppressMarkers: true,
+                                            polylineOptions: {
+                                                strokeColor: "#2563eb",
+                                                strokeWeight: 5,
+                                                strokeOpacity: 0.8,
+                                            },
+                                        }}
+                                    />
+                                )}
+                                {/* Pending stop location (before form submit) */}
+                                {stopLocation && markerMode === null && selectedRouteId && (
+                                    <MarkerF
+                                        position={stopLocation}
+                                        title="New stop (unsaved)"
+                                        icon={{
+                                            path: google.maps.SymbolPath.CIRCLE,
+                                            scale: 10,
+                                            fillColor: "#7c3aed",
+                                            fillOpacity: 0.85,
+                                            strokeColor: "#fff",
+                                            strokeWeight: 2,
+                                        }}
+                                    />
+                                )}
+                            </GoogleMap>
+                        )}
                     </div>
 
                     <div className="flex-1 rounded-2xl border border-gray-200 bg-white overflow-hidden flex flex-col">

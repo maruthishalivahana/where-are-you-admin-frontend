@@ -102,6 +102,20 @@ export interface Stop {
     updatedAt?: string;
 }
 
+export interface RouteDetailStop {
+    id?: string;
+    name: string;
+    lat: number;
+    lng: number;
+    order: number;
+}
+
+export interface RouteDetailResponse {
+    routeId: string;
+    polyline: string;
+    stops: RouteDetailStop[];
+}
+
 export interface Route {
     _id: string;
     name: string;
@@ -119,6 +133,34 @@ export interface Route {
 }
 
 export const getRoutes = () => api.get<Route[] | { routes: Route[] } | { data: Route[] }>("/api/admin/routes");
+const ROUTE_DETAIL_ENDPOINTS = [
+    "/api/admin/routes",
+    "/routes",
+    "/api/routes",
+];
+
+export const getRouteById = async (routeId: string) => {
+    let lastError: unknown;
+
+    for (const basePath of ROUTE_DETAIL_ENDPOINTS) {
+        try {
+            return await api.get<
+                RouteDetailResponse |
+                { route: RouteDetailResponse } |
+                { data: RouteDetailResponse } |
+                { data: { route: RouteDetailResponse } }
+            >(`${basePath}/${routeId}`);
+        } catch (err: unknown) {
+            lastError = err;
+            const status = (err as { response?: { status?: number } })?.response?.status;
+            if (status !== 404) {
+                throw err;
+            }
+        }
+    }
+
+    throw lastError ?? new Error("Route detail endpoint not found");
+};
 export const createRoute = (data: RoutePayload) =>
     api.post<Route | { route: Route } | { data: Route }>("/api/admin/routes", data);
 export const deleteRoute = (id: string) =>
