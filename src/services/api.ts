@@ -225,23 +225,6 @@ export interface UpdateBusRoutePayload {
     routeName: string;
 }
 
-export type BusTripEventPayload =
-    | { eventType: "trip_completed" }
-    | { eventType: "trip_cancelled" }
-    | { eventType: "trip_started" }
-    | { eventType: "trip_delayed"; delayMinutes: number }
-    | {
-        eventType: "transition";
-        nextTripStatus:
-        | "NOT_SCHEDULED"
-        | "TRIP_NOT_STARTED"
-        | "ON_TRIP"
-        | "COMPLETED"
-        | "DELAYED"
-        | "CANCELLED"
-        | "MAINTENANCE_HOLD";
-    };
-
 export interface BusResponse {
     _id: string;
     numberPlate: string;
@@ -281,9 +264,6 @@ export const updateBusDriver = (busId: string, data: UpdateBusDriverPayload) =>
 
 export const updateBusRoute = (busId: string, data: UpdateBusRoutePayload) =>
     api.put<{ bus: BusResponse }>(`/api/buses/${busId}/route`, data);
-
-export const postBusTripEvent = (busId: string, data: BusTripEventPayload) =>
-    api.post<{ bus: BusResponse }>(`/api/buses/${busId}/trip-events`, data);
 
 export const deleteBus = (busId: string) =>
     api.delete(`/api/buses/${busId}`);
