@@ -59,7 +59,9 @@ export interface SignupPayload {
 }
 
 export interface AuthResponse {
-    token: string;
+    token?: string;
+    accessToken?: string;
+    refreshToken?: string;
     admin?: {
         id: string;
         name: string;

@@ -44,7 +44,10 @@ const getBaseUrl = () => {
 
 const getAuthToken = () => {
     if (typeof window === "undefined") return ""
-    return localStorage.getItem("token") ?? ""
+    const token = localStorage.getItem("token") ?? ""
+    const trimmed = token.trim()
+    if (!trimmed || trimmed === "undefined" || trimmed === "null") return ""
+    return trimmed
 }
 
 export const getTrackingSocket = (): TrackingSocket => {
@@ -52,8 +55,6 @@ export const getTrackingSocket = (): TrackingSocket => {
 
     const baseUrl = getBaseUrl()
     const token = getAuthToken()
-
-    console.info("[tracking-socket] token from localStorage:", token || "(empty)")
 
     socket = io(baseUrl, {
         path: "/socket.io",
@@ -67,7 +68,7 @@ export const getTrackingSocket = (): TrackingSocket => {
         },
     })
 
-    console.info("[tracking-socket] init", { baseUrl, path: "/socket.io", hasToken: !!token })
+    console.info("[tracking-socket] init", { baseUrl, path: "/socket.io", hasToken: Boolean(token) })
 
     socket.on("connect", () => {
         console.info("[tracking-socket] connected", { socketId: socket?.id })

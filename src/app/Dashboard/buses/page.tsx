@@ -303,7 +303,7 @@ export default function BusesPage() {
 
         const currentKey = String(current._id || current.id || current.numberPlate)
         const latest = busesWithDriverNames.find((bus) => {
-          const key = String(bus._id || bus.id || bus.numberPlate)
+          const key = String(bus._id || (bus as unknown as { id?: string }).id || bus.numberPlate)
           return key === currentKey
         })
 

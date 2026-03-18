@@ -28,6 +28,17 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+const normalizeToken = (value: string | null | undefined): string | null => {
+    if (!value) return null;
+    const trimmed = value.trim();
+    if (!trimmed || trimmed === "undefined" || trimmed === "null") return null;
+    return trimmed;
+};
+
+const extractAuthToken = (payload: { token?: string; accessToken?: string }): string | null => {
+    return normalizeToken(payload.accessToken) ?? normalizeToken(payload.token);
+};
+
 export function AuthProvider({ children }: { children: ReactNode }) {
     const [token, setToken] = useState<string | null>(null);
     const [user, setUser] = useState<AdminUser | null>(null);
@@ -35,9 +46,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     // Hydrate from localStorage on client boot
     useEffect(() => {
-        const stored = localStorage.getItem("token");
+        const stored = normalizeToken(localStorage.getItem("token"));
         const storedUser = localStorage.getItem("admin_user");
-        if (stored) setToken(stored);
+        if (stored) {
+            localStorage.setItem("token", stored);
+            setToken(stored);
+        } else {
+            localStorage.removeItem("token");
+        }
         if (storedUser) {
             try {
                 setUser(JSON.parse(storedUser));
@@ -49,8 +65,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }, []);
 
     const persist = (tok: string, admin?: AdminUser | null) => {
-        localStorage.setItem("token", tok);
-        setToken(tok);
+        const normalized = normalizeToken(tok);
+        if (!normalized) {
+            throw new Error("Authentication token missing in server response.");
+        }
+
+        localStorage.setItem("token", normalized);
+        setToken(normalized);
         if (admin) {
             localStorage.setItem("admin_user", JSON.stringify(admin));
             setUser(admin);
@@ -59,15 +80,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const login = useCallback(async (payload: LoginPayload) => {
         const { data } = await adminLogin(payload);
-        // Backend returns 'accessToken', frontend stores as 'token'
-        const token = (data as any).accessToken || data.token;
+        const token = extractAuthToken(data);
+        if (!token) {
+            throw new Error("Login succeeded but no access token was returned.");
+        }
         persist(token, data.admin ?? null);
     }, []);
 
     const signup = useCallback(async (payload: SignupPayload) => {
         const { data } = await adminSignup(payload);
-        // Backend returns 'accessToken', frontend stores as 'token'
-        const token = (data as any).accessToken || data.token;
+        const token = extractAuthToken(data);
+        if (!token) {
+            throw new Error("Signup succeeded but no access token was returned.");
+        }
         persist(token, data.admin ?? null);
     }, []);
 
