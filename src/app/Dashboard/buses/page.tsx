@@ -1,13 +1,13 @@
 "use client"
 
-import { useMemo, useState, useEffect, useCallback } from "react"
+import { useMemo, useState, useEffect, useCallback, useRef } from "react"
 import { Plus, AlertCircle, CheckCircle } from "lucide-react"
 
 import { AddBusDialog } from "@/components/buses/add-bus-dialog"
 import { AssignDriverDialog } from "@/components/buses/assign-driver-dialog"
-import { BusTable, type Bus } from "@/components/buses/bus-table"
+import { BusTable } from "../../../components/buses/bus-table"
 import { DeleteBusDialog } from "@/components/buses/delete-bus-dialog"
-import { ViewBusDialog } from "@/components/buses/view-bus-dialog"
+import { ViewBusDialog } from "../../../components/buses/view-bus-dialog"
 import { Header } from "@/components/layout/header"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -30,24 +30,41 @@ import {
   getDrivers,
   type BusResponse,
   type Route,
-  type Driver
+  type Driver,
+  type Bus as ApiBus,
 } from "@/services/api"
 import {
-  getStatusSortOrder,
-  matchesStatusFilter,
-  normalizeBusStatuses,
-} from "@/lib/bus-status"
+  getTripStatusSortOrder,
+  matchesTripStatusFilter,
+  toTripStatusValue,
+  type TripStatusValue,
+} from "../../../lib/bus-status"
+import {
+  buildDriverUpdatePayload,
+  getErrorMessage,
+  resolveBusKey,
+  resolveRouteUpdatePayload,
+} from "./mutation-utils"
 
 interface Toast {
   type: "success" | "error"
   message: string
 }
 
-interface BusWithDriverName extends Bus {
+interface BusWithDriverName {
+  _id?: string
   id?: string
+  numberPlate: string
+  routeName?: string
+  routeId?: string
+  driverId?: string
+  fleetStatus?: string
+  tripStatus?: TripStatusValue
+  status?: "active" | "inactive"
   driverName?: string
   currentLat?: number
   currentLng?: number
+  speed?: number
   createdAt?: string
   updatedAt?: string
 }
@@ -57,6 +74,8 @@ const ROUTE_CACHE_KEY = "busRouteCache"
 interface FetchAllDataOptions {
   silent?: boolean
 }
+
+type RowActionKind = "Assigning driver" | "Updating route" | "Deleting bus"
 
 const loadRouteCache = (): Record<string, string> => {
   if (typeof window === "undefined") return {}
@@ -111,24 +130,11 @@ const extractList = <T,>(input: unknown, keys: string[]): T[] => {
   return []
 }
 
-const getErrorMessage = (err: unknown, fallback: string) => {
-  if (err && typeof err === "object" && "response" in err) {
-    const maybe = err as { response?: { data?: { message?: unknown } } }
-    const msg = maybe.response?.data?.message
-    if (typeof msg === "string" && msg.trim()) {
-      const normalized = msg.toLowerCase()
-      if (normalized.includes("invalid trip status transition") && normalized.includes("on_trip")) {
-        return "Cannot change route while bus is on an active trip. Complete or cancel the trip first."
-      }
-      return msg
-    }
-  }
-  return fallback
-}
+const isDevBuild = process.env.NODE_ENV !== "production"
 
-const isRouteChangeBlockedByTripState = (bus: Pick<BusWithDriverName, "tripStatus" | "fleetStatus" | "trackingStatus" | "routeName" | "status">) => {
-  const normalized = normalizeBusStatuses(bus)
-  return normalized.tripStatus === "ON_TRIP" || normalized.tripStatus === "DELAYED"
+const logDevMutation = (label: string, stage: "request" | "response", payload: unknown) => {
+  if (!isDevBuild) return
+  console.log(`[buses:${label}] ${stage}`, payload)
 }
 
 export default function BusesPage() {
@@ -146,17 +152,93 @@ export default function BusesPage() {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
   const [isViewDialogOpen, setIsViewDialogOpen] = useState(false)
   const [isRouteDialogOpen, setIsRouteDialogOpen] = useState(false)
-  const [selectedRouteName, setSelectedRouteName] = useState<string>("")
-  const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
+  const [selectedRouteValue, setSelectedRouteValue] = useState<string>("")
 
   const [routeFilter, setRouteFilter] = useState("All Routes")
   const [searchQuery, setSearchQuery] = useState("")
-  const [fleetStatusFilter, setFleetStatusFilter] = useState("ALL")
   const [tripStatusFilter, setTripStatusFilter] = useState("ALL")
-  const [trackingStatusFilter, setTrackingStatusFilter] = useState("ALL")
   const [sortBy, setSortBy] = useState("NUMBER_PLATE_ASC")
 
   const [selectedBus, setSelectedBus] = useState<BusWithDriverName | null>(null)
+  const [rowActionByBusKey, setRowActionByBusKey] = useState<Record<string, RowActionKind>>({})
+  const rowActionRef = useRef<Record<string, RowActionKind>>({})
+
+  const beginRowAction = useCallback((busKey: string, action: RowActionKind) => {
+    if (rowActionRef.current[busKey]) {
+      return false
+    }
+
+    rowActionRef.current[busKey] = action
+    setRowActionByBusKey((current) => ({
+      ...current,
+      [busKey]: action,
+    }))
+    return true
+  }, [])
+
+  const endRowAction = useCallback((busKey: string) => {
+    delete rowActionRef.current[busKey]
+    setRowActionByBusKey((current) => {
+      if (!current[busKey]) {
+        return current
+      }
+
+      const next = { ...current }
+      delete next[busKey]
+      return next
+    })
+  }, [])
+
+  const applyMutationBus = useCallback((
+    targetBusKey: string,
+    updatedBus: Partial<ApiBus>,
+    extraPatch?: Partial<BusWithDriverName>
+  ) => {
+    setBuses((previous) => previous.map((bus) => {
+      if (resolveBusKey(bus) !== targetBusKey) {
+        return bus
+      }
+
+      return {
+        ...bus,
+        ...updatedBus,
+        ...(extraPatch ?? {}),
+      }
+    }))
+
+    setSelectedBus((current) => {
+      if (!current || resolveBusKey(current) !== targetBusKey) {
+        return current
+      }
+
+      return {
+        ...current,
+        ...updatedBus,
+        ...(extraPatch ?? {}),
+      }
+    })
+  }, [])
+
+  const isBusRowBusy = useCallback((bus: Pick<BusWithDriverName, "_id" | "id" | "numberPlate">) => {
+    return Boolean(rowActionByBusKey[resolveBusKey(bus)])
+  }, [rowActionByBusKey])
+
+  const getBusRowActionLabel = useCallback((bus: Pick<BusWithDriverName, "_id" | "id" | "numberPlate">) => {
+    return rowActionByBusKey[resolveBusKey(bus)] ?? null
+  }, [rowActionByBusKey])
+
+  const resolveBusSelection = useCallback((bus: Pick<BusWithDriverName, "_id" | "id" | "numberPlate">, idx: number) => {
+    const busKey = resolveBusKey(bus)
+    const matchIndex = buses.findIndex((currentBus) => resolveBusKey(currentBus) === busKey)
+    const resolvedIndex = matchIndex !== -1 ? matchIndex : idx
+    const matchedBus = matchIndex !== -1 ? buses[matchIndex] : buses[resolvedIndex]
+
+    return {
+      resolvedIndex,
+      matchedBus,
+      busKey,
+    }
+  }, [buses])
 
   // Fetch initial data
   const fetchAllData = useCallback(async ({ silent = false }: FetchAllDataOptions = {}) => {
@@ -352,15 +434,10 @@ export default function BusesPage() {
   }
 
   const busesWithCanonicalStatus = useMemo(() => {
-    return buses.map((bus) => {
-      const normalized = normalizeBusStatuses(bus)
-      return {
-        ...bus,
-        fleetStatus: normalized.fleetStatus,
-        tripStatus: normalized.tripStatus,
-        trackingStatus: normalized.trackingStatus,
-      }
-    })
+    return buses.map((bus) => ({
+      ...bus,
+      tripStatus: toTripStatusValue(bus.tripStatus),
+    }))
   }, [buses])
 
   const filteredBuses = useMemo(() => {
@@ -368,9 +445,7 @@ export default function BusesPage() {
 
     const list = busesWithCanonicalStatus.filter((bus) => {
       const routeMatches = routeFilter === "All Routes" || bus.routeName === routeFilter
-      const fleetMatches = matchesStatusFilter(bus.fleetStatus, fleetStatusFilter)
-      const tripMatches = matchesStatusFilter(bus.tripStatus, tripStatusFilter)
-      const trackingMatches = matchesStatusFilter(bus.trackingStatus, trackingStatusFilter)
+      const tripMatches = matchesTripStatusFilter(bus.tripStatus, tripStatusFilter)
 
       const searchMatches =
         query.length === 0 ||
@@ -378,7 +453,7 @@ export default function BusesPage() {
           .filter(Boolean)
           .some((value) => String(value).toLowerCase().includes(query))
 
-      return routeMatches && fleetMatches && tripMatches && trackingMatches && searchMatches
+      return routeMatches && tripMatches && searchMatches
     })
 
     return list.sort((left, right) => {
@@ -386,18 +461,8 @@ export default function BusesPage() {
         return right.numberPlate.localeCompare(left.numberPlate)
       }
 
-      if (sortBy === "FLEET_STATUS") {
-        const diff = getStatusSortOrder("fleet", left.fleetStatus) - getStatusSortOrder("fleet", right.fleetStatus)
-        return diff !== 0 ? diff : left.numberPlate.localeCompare(right.numberPlate)
-      }
-
       if (sortBy === "TRIP_STATUS") {
-        const diff = getStatusSortOrder("trip", left.tripStatus) - getStatusSortOrder("trip", right.tripStatus)
-        return diff !== 0 ? diff : left.numberPlate.localeCompare(right.numberPlate)
-      }
-
-      if (sortBy === "TRACKING_STATUS") {
-        const diff = getStatusSortOrder("tracking", left.trackingStatus) - getStatusSortOrder("tracking", right.trackingStatus)
+        const diff = getTripStatusSortOrder(left.tripStatus) - getTripStatusSortOrder(right.tripStatus)
         return diff !== 0 ? diff : left.numberPlate.localeCompare(right.numberPlate)
       }
 
@@ -407,9 +472,7 @@ export default function BusesPage() {
     busesWithCanonicalStatus,
     routeFilter,
     searchQuery,
-    fleetStatusFilter,
     tripStatusFilter,
-    trackingStatusFilter,
     sortBy,
   ])
 
@@ -423,7 +486,7 @@ export default function BusesPage() {
 
       const newBus = response.data.bus
       setBuses(prev => [newBus, ...prev])
-      const cacheKey = String(newBus._id || (newBus as unknown as { id?: string }).id || newBus.numberPlate)
+      const cacheKey = resolveBusKey(newBus)
       saveRouteToCache(cacheKey, newBus.routeName ?? routeName)
       setIsAddDialogOpen(false)
       showSuccess("Bus created successfully!")
@@ -437,26 +500,30 @@ export default function BusesPage() {
   const handleAssignDriver = useCallback(async (memberId: string) => {
     if (!selectedBus) return
 
+    const busKey = resolveBusKey(selectedBus)
+    if (!beginRowAction(busKey, "Assigning driver")) {
+      return
+    }
+
     try {
-      setLoading(true)
       const busId = selectedBus._id || selectedBus.id || ""
-      const response = await updateBusDriver(busId, {
-        memberId
-      })
+      const payload = buildDriverUpdatePayload(memberId)
+      logDevMutation("driver update", "request", { busId, payload })
 
-      const updatedBus = response.data.bus
-      const driver = drivers.find((d) => d.memberId === memberId)
-      const driverName = driver?.name
+      const response = await updateBusDriver(busId, payload)
+      logDevMutation("driver update", "response", response.data)
 
-      setBuses(prev =>
-        prev.map((bus, idx) => {
-          const idMatch = bus._id && selectedBus._id && bus._id === selectedBus._id
-          const idxMatch = selectedIndex !== null && idx === selectedIndex
-          return (idMatch || idxMatch)
-            ? { ...updatedBus, driverName }
-            : bus
+      const updatedBus = response.data.bus as Partial<BusResponse> | undefined
+      const hasDriverField = Boolean(updatedBus) && Object.prototype.hasOwnProperty.call(updatedBus, "driverId")
+      const driver = drivers.find((currentDriver) => currentDriver.memberId === memberId)
+
+      if (updatedBus && hasDriverField) {
+        applyMutationBus(busKey, updatedBus, {
+          driverName: driver?.name,
         })
-      )
+      } else {
+        await fetchAllData({ silent: true })
+      }
 
       // Reflect assignment on drivers list for driver page + reuse
       setDrivers(prev => prev.map(d => {
@@ -471,98 +538,103 @@ export default function BusesPage() {
         }
         return d
       }))
+
       setSelectedBus(null)
-      setSelectedIndex(null)
       setIsAssignDriverDialogOpen(false)
       showSuccess("Driver assigned successfully!")
     } catch (err: unknown) {
       showError(getErrorMessage(err, "Failed to assign driver"))
     } finally {
-      setLoading(false)
+      endRowAction(busKey)
     }
-  }, [drivers, selectedBus, selectedIndex])
+  }, [applyMutationBus, beginRowAction, drivers, endRowAction, fetchAllData, selectedBus])
 
-  const handleOpenRouteDialog = useCallback((bus: BusWithDriverName, idx: number) => {
-    if (isRouteChangeBlockedByTripState(bus)) {
-      showToast("error", `Cannot change route for ${bus.numberPlate} while trip is active.`)
-      return
-    }
-
+  const handleOpenRouteDialog = useCallback((bus: BusWithDriverName) => {
     setSelectedBus(bus)
-    setSelectedIndex(idx)
-    setSelectedRouteName(bus.routeName || "")
+    const matchingRoute = routes.find((route) => route.name === bus.routeName)
+    const fallbackRouteValue = bus.routeId || bus.routeName || ""
+    setSelectedRouteValue(matchingRoute?._id || fallbackRouteValue)
     setIsRouteDialogOpen(true)
-  }, [showToast])
+  }, [routes])
 
   const handleUpdateRoute = useCallback(async () => {
     if (!selectedBus) return
 
-    if (isRouteChangeBlockedByTripState(selectedBus)) {
-      showToast("error", `Cannot change route for ${selectedBus.numberPlate} while trip is active.`)
+    const busKey = resolveBusKey(selectedBus)
+    if (!beginRowAction(busKey, "Updating route")) {
       return
     }
 
     try {
-      setLoading(true)
       const busId = selectedBus._id || selectedBus.id || ""
-      const response = await updateBusRoute(busId, { routeName: selectedRouteName })
-      const updatedBus = response.data.bus
-      const cacheKey = String(selectedBus._id || selectedBus.id || selectedBus.numberPlate)
-      saveRouteToCache(cacheKey, selectedRouteName)
+      const payload = resolveRouteUpdatePayload(selectedRouteValue, routes)
+      logDevMutation("route update", "request", { busId, payload })
 
-      setBuses(prev => prev.map((bus, idx) => {
-        const idMatch = bus._id && selectedBus._id && bus._id === selectedBus._id
-        const idxMatch = selectedIndex !== null && idx === selectedIndex
-        return (idMatch || idxMatch)
-          ? { ...updatedBus, driverName: bus.driverName }
-          : bus
-      }))
+      const response = await updateBusRoute(busId, payload)
+      logDevMutation("route update", "response", response.data)
+
+      const updatedBus = response.data.bus as Partial<BusResponse> | undefined
+      const hasRouteField = Boolean(updatedBus)
+        && (Object.prototype.hasOwnProperty.call(updatedBus, "routeId")
+          || Object.prototype.hasOwnProperty.call(updatedBus, "routeName"))
+
+      const selectedRoute = routes.find((route) => route._id === selectedRouteValue)
+      const fallbackRouteName = payload.routeName ?? selectedRoute?.name
+
+      if (updatedBus && hasRouteField) {
+        applyMutationBus(busKey, updatedBus, {
+          routeName: updatedBus.routeName ?? fallbackRouteName,
+          routeId: updatedBus.routeId ?? payload.routeId,
+          tripStatus: selectedBus.tripStatus,
+        })
+      } else {
+        await fetchAllData({ silent: true })
+      }
+
+      saveRouteToCache(busKey, updatedBus?.routeName ?? fallbackRouteName)
 
       setIsRouteDialogOpen(false)
       setSelectedBus(null)
-      setSelectedIndex(null)
       showSuccess("Route updated")
     } catch (err: unknown) {
       showError(getErrorMessage(err, "Failed to update route"))
     } finally {
-      setLoading(false)
+      endRowAction(busKey)
     }
-  }, [selectedBus, selectedRouteName, selectedIndex, showToast])
+  }, [applyMutationBus, beginRowAction, endRowAction, fetchAllData, routes, selectedBus, selectedRouteValue])
 
   const handleDeleteBus = useCallback(async () => {
     if (!selectedBus) return
 
+    const busKey = resolveBusKey(selectedBus)
+    if (!beginRowAction(busKey, "Deleting bus")) {
+      return
+    }
+
     try {
-      setLoading(true)
       const busId = selectedBus._id || selectedBus.id || ""
       await deleteBus(busId)
 
-      const cacheKey = String(selectedBus._id || selectedBus.id || selectedBus.numberPlate)
       if (typeof window !== "undefined") {
         try {
           const cache = loadRouteCache()
-          delete cache[cacheKey]
+          delete cache[busKey]
           localStorage.setItem(ROUTE_CACHE_KEY, JSON.stringify(cache))
         } catch {
           // ignore cache errors
         }
       }
 
-      setBuses(prev => prev.filter((bus, idx) => {
-        const idMatch = bus._id && selectedBus._id && bus._id === selectedBus._id
-        const idxMatch = selectedIndex !== null && idx === selectedIndex
-        return !(idMatch || idxMatch)
-      }))
+      setBuses(prev => prev.filter((bus) => resolveBusKey(bus) !== busKey))
       setSelectedBus(null)
-      setSelectedIndex(null)
       setIsDeleteDialogOpen(false)
       showSuccess("Bus deleted successfully!")
     } catch (err: unknown) {
       showError(getErrorMessage(err, "Failed to delete bus"))
     } finally {
-      setLoading(false)
+      endRowAction(busKey)
     }
-  }, [selectedBus, selectedIndex])
+  }, [beginRowAction, endRowAction, selectedBus])
 
   const handleViewBus = useCallback(async (bus: BusWithDriverName) => {
     try {
@@ -582,6 +654,23 @@ export default function BusesPage() {
     const routeNames = new Set(buses.map(b => b.routeName).filter((r): r is string => !!r))
     return Array.from(routeNames)
   }, [buses])
+
+  const routePickerOptions = useMemo(() => {
+    return routes.map((route) => ({
+      value: route._id || route.name,
+      label: route.name,
+    }))
+  }, [routes])
+
+  const hasSelectedRouteOption = useMemo(() => {
+    if (!selectedRouteValue) {
+      return true
+    }
+
+    return routePickerOptions.some((option) => option.value === selectedRouteValue)
+  }, [routePickerOptions, selectedRouteValue])
+
+  const isSelectedBusBusy = selectedBus ? isBusRowBusy(selectedBus) : false
 
   return (
     <>
@@ -655,10 +744,8 @@ export default function BusesPage() {
               numberPlate: b.numberPlate,
               routeName: b.routeName,
               routeId: b.routeId,
-              fleetStatus: b.fleetStatus,
               tripStatus: b.tripStatus,
               status: b.status,
-              trackingStatus: b.trackingStatus,
               driverName: b.driverName,
               driverId: b.driverId,
               currentLat: b.currentLat,
@@ -668,60 +755,48 @@ export default function BusesPage() {
             routes={uniqueRoutes}
             searchQuery={searchQuery}
             routeFilter={routeFilter}
-            fleetStatusFilter={fleetStatusFilter}
             tripStatusFilter={tripStatusFilter}
-            trackingStatusFilter={trackingStatusFilter}
             sortBy={sortBy}
             onSearchQueryChange={setSearchQuery}
             onRouteFilterChange={setRouteFilter}
-            onFleetStatusFilterChange={setFleetStatusFilter}
             onTripStatusFilterChange={setTripStatusFilter}
-            onTrackingStatusFilterChange={setTrackingStatusFilter}
             onSortByChange={setSortBy}
             onClearFilters={() => {
               setSearchQuery("")
               setRouteFilter("All Routes")
-              setFleetStatusFilter("ALL")
               setTripStatusFilter("ALL")
-              setTrackingStatusFilter("ALL")
               setSortBy("NUMBER_PLATE_ASC")
             }}
+            isBusRowBusy={isBusRowBusy}
+            getBusRowActionLabel={getBusRowActionLabel}
             onAssignDriver={(bus, idx) => {
-              const matchIndex = buses.findIndex(b =>
-                (b._id && bus._id && b._id === bus._id)
-                || (b.id && bus.id && b.id === bus.id)
-                || b.numberPlate === bus.numberPlate
-              )
-              const resolvedIndex = matchIndex !== -1 ? matchIndex : idx
-              const match = matchIndex !== -1 ? buses[matchIndex] : buses[resolvedIndex]
+              const { matchedBus } = resolveBusSelection(bus, idx)
 
-              setSelectedBus(match || null)
-              setSelectedIndex(resolvedIndex)
+              if (!matchedBus) {
+                showToast("error", "Unable to resolve bus for driver assignment")
+                return
+              }
+
+              setSelectedBus(matchedBus)
               setIsAssignDriverDialogOpen(true)
             }}
             onChangeRoute={(bus, idx) => {
-              const matchIndex = buses.findIndex(b =>
-                (b._id && bus._id && b._id === bus._id)
-                || (b.id && bus.id && b.id === bus.id)
-                || b.numberPlate === bus.numberPlate
-              )
-              const resolvedIndex = matchIndex !== -1 ? matchIndex : idx
-              const match = matchIndex !== -1 ? buses[matchIndex] : buses[resolvedIndex]
+              const { matchedBus } = resolveBusSelection(bus, idx)
 
-              if (match) handleOpenRouteDialog(match, resolvedIndex)
+              if (matchedBus) {
+                handleOpenRouteDialog(matchedBus)
+              }
             }}
             onViewBus={(bus) => handleViewBus(bus)}
             onDeleteBus={(bus, idx) => {
-              const matchIndex = buses.findIndex(b =>
-                (b._id && bus._id && b._id === bus._id)
-                || (b.id && bus.id && b.id === bus.id)
-                || b.numberPlate === bus.numberPlate
-              )
-              const resolvedIndex = matchIndex !== -1 ? matchIndex : idx
-              const match = matchIndex !== -1 ? buses[matchIndex] : buses[resolvedIndex]
+              const { matchedBus } = resolveBusSelection(bus, idx)
 
-              setSelectedBus(match || null)
-              setSelectedIndex(resolvedIndex)
+              if (!matchedBus) {
+                showToast("error", "Unable to resolve bus for deletion")
+                return
+              }
+
+              setSelectedBus(matchedBus)
               setIsDeleteDialogOpen(true)
             }}
           />
@@ -756,20 +831,24 @@ export default function BusesPage() {
           <div className="space-y-3">
             <label className="text-sm font-medium text-gray-700">Route</label>
             <select
-              value={selectedRouteName}
-              onChange={(e) => setSelectedRouteName(e.target.value)}
+              value={selectedRouteValue}
+              onChange={(e) => setSelectedRouteValue(e.target.value)}
+              disabled={isSelectedBusBusy}
               className="h-10 w-full rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="">None</option>
-              {routes.map((route) => (
-                <option key={route._id || route.name} value={route.name}>{route.name}</option>
+              {!hasSelectedRouteOption && selectedRouteValue && (
+                <option value={selectedRouteValue}>{selectedRouteValue}</option>
+              )}
+              {routePickerOptions.map((route) => (
+                <option key={`${route.value}-${route.label}`} value={route.value}>{route.label}</option>
               ))}
             </select>
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setIsRouteDialogOpen(false)} className="rounded-lg">Cancel</Button>
-            <Button onClick={handleUpdateRoute} disabled={loading} className="rounded-lg bg-blue-600 hover:bg-blue-700">
+            <Button variant="outline" onClick={() => setIsRouteDialogOpen(false)} className="rounded-lg" disabled={isSelectedBusBusy}>Cancel</Button>
+            <Button onClick={handleUpdateRoute} disabled={loading || isSelectedBusBusy} className="rounded-lg bg-blue-600 hover:bg-blue-700">
               Save
             </Button>
           </DialogFooter>

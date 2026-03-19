@@ -1,11 +1,23 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Sidebar } from "@/components/layout/sidebasr";
 import { SidebarContext } from "@/components/layout/sidebar-context";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-    const [isOpen, setIsOpen] = useState(true);
+    const [isOpen, setIsOpen] = useState(false);
+
+    useEffect(() => {
+        const media = window.matchMedia("(min-width: 1024px)");
+        const syncSidebar = () => setIsOpen(media.matches);
+
+        syncSidebar();
+        media.addEventListener("change", syncSidebar);
+
+        return () => {
+            media.removeEventListener("change", syncSidebar);
+        };
+    }, []);
 
     return (
         <SidebarContext value={{ isOpen, toggle: () => setIsOpen((p) => !p) }}>

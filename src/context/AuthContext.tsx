@@ -32,7 +32,11 @@ const normalizeToken = (value: string | null | undefined): string | null => {
     if (!value) return null;
     const trimmed = value.trim();
     if (!trimmed || trimmed === "undefined" || trimmed === "null") return null;
-    return trimmed;
+
+    // Accept either raw JWT or "Bearer <jwt>" and persist raw token only.
+    const withoutBearer = trimmed.replace(/^Bearer\s+/i, "").trim();
+    if (!withoutBearer || withoutBearer === "undefined" || withoutBearer === "null") return null;
+    return withoutBearer;
 };
 
 const extractAuthToken = (payload: { token?: string; accessToken?: string }): string | null => {

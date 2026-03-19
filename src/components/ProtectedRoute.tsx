@@ -8,11 +8,21 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
     const { token, isLoading } = useAuth();
     const router = useRouter();
 
+    const normalizeToken = (value: string | null | undefined): string | null => {
+        if (!value) return null;
+        const trimmed = value.trim();
+        if (!trimmed || trimmed === "undefined" || trimmed === "null") return null;
+
+        const withoutBearer = trimmed.replace(/^Bearer\s+/i, "").trim();
+        if (!withoutBearer || withoutBearer === "undefined" || withoutBearer === "null") return null;
+        return withoutBearer;
+    };
+
     // Also check localStorage directly to avoid a race condition where
     // router.replace("/Dashboard") fires before React flushes setToken.
     const hasToken =
-        token !== null ||
-        (typeof window !== "undefined" && !!localStorage.getItem("token"));
+        normalizeToken(token) !== null ||
+        (typeof window !== "undefined" && normalizeToken(localStorage.getItem("token")) !== null);
 
     useEffect(() => {
         if (!isLoading && !hasToken) {

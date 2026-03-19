@@ -22,20 +22,18 @@ api.interceptors.response.use(
     (response) => response,
     (error) => {
         const status = error?.response?.status;
-        const message: string | undefined = error?.response?.data?.message;
-        const isAuthError =
-            status === 401 &&
-            typeof window !== "undefined" &&
-            (message?.toLowerCase().includes("invalid") ||
-                message?.toLowerCase().includes("expired") ||
-                message?.toLowerCase().includes("unauthorized"));
+        const isAuthError = status === 401 && typeof window !== "undefined";
 
         if (isAuthError) {
             localStorage.removeItem("token");
             localStorage.removeItem("admin_user");
 
-            // Avoid redirect loop if already on the login page
-            if (!window.location.pathname.startsWith("/login")) {
+            // Avoid redirect loop on auth pages.
+            const onAuthPage =
+                window.location.pathname.startsWith("/login") ||
+                window.location.pathname.startsWith("/signup");
+
+            if (!onAuthPage) {
                 window.location.href = "/login";
             }
         }
@@ -74,7 +72,7 @@ export const adminLogin = (data: LoginPayload) =>
     api.post<AuthResponse>("/api/auth/admin/login", data);
 
 export const adminSignup = (data: SignupPayload) =>
-    api.post<AuthResponse>("/auth/admin/signup", data);
+    api.post<AuthResponse>("/api/auth/admin/signup", data);
 
 // ─── Routes ────────────────────────────────────────────────────────────────
 
@@ -186,6 +184,14 @@ export const deleteStop = (stopId: string) =>
 
 // ─── Buses ─────────────────────────────────────────────────────────────────
 
+export type TripStatus =
+    | "PENDING"
+    | "STARTED"
+    | "RUNNING"
+    | "STOPPED"
+    | "COMPLETED"
+    | "CANCELLED";
+
 export interface Bus {
     _id?: string;
     id?: string;
@@ -193,16 +199,8 @@ export interface Bus {
     routeName?: string;
     routeId?: string;
     driverId?: string;
-    fleetStatus?: "IN_SERVICE" | "OUT_OF_SERVICE" | "MAINTENANCE";
-    tripStatus?:
-    | "NOT_SCHEDULED"
-    | "TRIP_NOT_STARTED"
-    | "ON_TRIP"
-    | "COMPLETED"
-    | "DELAYED"
-    | "CANCELLED"
-    | "MAINTENANCE_HOLD";
-    trackingStatus?: "RUNNING" | "IDLE" | "OFFLINE" | "NO_SIGNAL" | "online" | "offline" | "idle" | "moving";
+    fleetStatus?: string;
+    tripStatus?: TripStatus;
     // Deprecated: use fleetStatus instead. Kept temporarily for backward compatibility.
     status?: "active" | "inactive";
     currentLat?: number;
@@ -222,7 +220,8 @@ export interface UpdateBusDriverPayload {
 }
 
 export interface UpdateBusRoutePayload {
-    routeName: string;
+    routeId?: string;
+    routeName?: string;
 }
 
 export interface BusResponse {
@@ -231,16 +230,8 @@ export interface BusResponse {
     routeName?: string;
     routeId?: string;
     driverId?: string;
-    fleetStatus?: "IN_SERVICE" | "OUT_OF_SERVICE" | "MAINTENANCE";
-    tripStatus?:
-    | "NOT_SCHEDULED"
-    | "TRIP_NOT_STARTED"
-    | "ON_TRIP"
-    | "COMPLETED"
-    | "DELAYED"
-    | "CANCELLED"
-    | "MAINTENANCE_HOLD";
-    trackingStatus?: "RUNNING" | "IDLE" | "OFFLINE" | "NO_SIGNAL" | "online" | "offline" | "idle" | "moving";
+    fleetStatus?: string;
+    tripStatus?: TripStatus;
     // Deprecated: use fleetStatus instead. Kept temporarily for backward compatibility.
     status: "active" | "inactive";
     currentLat?: number;
@@ -267,6 +258,50 @@ export const updateBusRoute = (busId: string, data: UpdateBusRoutePayload) =>
 
 export const deleteBus = (busId: string) =>
     api.delete(`/api/buses/${busId}`);
+
+// ─── Trips ─────────────────────────────────────────────────────────────────
+
+export interface TripLocation {
+    lat: number;
+    lng: number;
+}
+
+export interface Trip {
+    _id?: string;
+    id?: string;
+    driverId: string;
+    busId: string;
+    routeId: string;
+    status: TripStatus;
+    startedAt?: string;
+    endedAt?: string;
+    createdAt?: string;
+    currentLocation?: TripLocation;
+}
+
+export interface StartTripPayload {
+    driverId: string;
+    busId: string;
+    routeId: string;
+    status: "STARTED";
+    startedAt: string;
+}
+
+export interface StopTripPayload {
+    tripId?: string;
+    driverId?: string;
+    status: "COMPLETED";
+    endedAt: string;
+}
+
+export const getActiveTrip = () =>
+    api.get<{ trip: Trip | null }>("/api/trip/active");
+
+export const startTrip = (data: StartTripPayload) =>
+    api.post<{ trip: Trip }>("/api/trip/start", data);
+
+export const stopTrip = (data: StopTripPayload) =>
+    api.post<{ trip: Trip }>("/api/trip/stop", data);
 
 // ─── Drivers ───────────────────────────────────────────────────────────────
 
