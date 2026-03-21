@@ -14,7 +14,11 @@ interface DeleteBusDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   onConfirm: () => void
-  bus?: any
+  bus?: {
+    numberPlate?: string
+    routeName?: string
+    status?: string
+  }
 }
 
 export function DeleteBusDialog({

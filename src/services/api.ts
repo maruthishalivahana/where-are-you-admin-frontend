@@ -52,6 +52,7 @@ export interface LoginPayload {
 export interface SignupPayload {
     name: string;
     organizationName: string;
+    organizationSlug: string;
     email: string;
     password: string;
 }
@@ -65,6 +66,11 @@ export interface AuthResponse {
         name: string;
         email: string;
         organizationName?: string;
+        organization?: {
+            id?: string;
+            name?: string;
+            slug?: string;
+        };
     };
 }
 
@@ -90,6 +96,7 @@ export interface RoutePayload {
     endLat: number;
     endLng: number;
     description?: string;
+    isActive?: boolean;
 }
 
 export interface Stop {
@@ -124,6 +131,7 @@ export interface Route {
     _id: string;
     name: string;
     description?: string;
+    isActive?: boolean;
     startName?: string;
     endName?: string;
     // Flat fields (used in create payload and may be in response)
@@ -177,7 +185,18 @@ export const createStop = (routeId: string, data: { name: string; latitude: numb
     api.post<{ stop: Stop }>(`/api/admin/routes/${routeId}/stops`, data);
 
 export const getStops = (routeId: string) =>
-    api.get<{ stops: Stop[] }>(`/api/admin/routes/${routeId}/stops`);
+    api.get<{ stops: Stop[] } | { data: Stop[] }>(`/api/admin/routes/${routeId}/stops`);
+
+export interface UpdateStopPayload {
+    name?: string;
+    latitude?: number;
+    longitude?: number;
+    sequenceOrder?: number;
+    radiusMeters?: number;
+}
+
+export const updateStop = (stopId: string, data: UpdateStopPayload) =>
+    api.put<{ stop: Stop } | Stop>(`/api/admin/stops/${stopId}`, data);
 
 export const deleteStop = (stopId: string) =>
     api.delete(`/api/admin/stops/${stopId}`);
@@ -313,59 +332,40 @@ export interface Driver {
     phone?: string;
     licenseNumber?: string;
     memberId?: string;
+    assignedBusId?: string;
     assignedBusNumber?: string;
     createdAt?: string;
 }
-
-const DRIVER_ENDPOINTS = [
-    // Backend primaries (provided)
-    "/api/driver/admin/all",
-    "/api/auth/admin/drivers",
-    // Common alternates / fallbacks
-    "/api/drivers",
-    "/api/admin/drivers",
-    "/api/driver",
-    "/api/admin/driver",
-    "/api/auth/drivers",
-];
-
-// Try multiple possible driver endpoints to handle backend variations
-const tryDriverRequest = async <T>(
-    method: "get" | "post",
-    payload?: unknown
-) => {
-    let lastError: unknown;
-    const baseUrls: (string | undefined)[] = [api.defaults.baseURL || undefined, undefined];
-
-    for (const path of DRIVER_ENDPOINTS) {
-        for (const baseURL of baseUrls) {
-            try {
-                if (method === "get") {
-                    return await api.request<T>({ url: path, method: "get", baseURL });
-                }
-                return await api.request<T>({ url: path, method: "post", data: payload, baseURL });
-            } catch (err: unknown) {
-                lastError = err;
-                const status = (err as { response?: { status?: number } })?.response?.status;
-                if (status !== 404) throw err;
-                // On 404 keep trying other baseURL/paths
-            }
-        }
-    }
-    throw lastError ?? new Error("Driver endpoint not found");
-};
-
-export const getDrivers = () =>
-    tryDriverRequest<{ drivers: Driver[] } | { data: Driver[] }>("get");
 
 export interface CreateDriverPayload {
     name: string;
     memberId: string;
     password: string;
+    email?: string;
+    phone?: string;
 }
 
+export interface UpdateDriverPayload {
+    name?: string;
+    memberId?: string;
+    password?: string;
+    email?: string;
+    phone?: string;
+}
+
+export const getDrivers = (q?: string) =>
+    api.get<{ drivers: Driver[] } | { data: Driver[] }>("/api/driver/admin/all", {
+        params: q ? { q } : undefined,
+    });
+
 export const createDriver = (data: CreateDriverPayload) =>
-    tryDriverRequest<{ driver: Driver }>("post", data);
+    api.post<{ driver: Driver } | Driver>("/api/auth/admin/drivers", data);
+
+export const updateDriver = (driverId: string, data: UpdateDriverPayload) =>
+    api.put<{ driver: Driver } | Driver>(`/api/driver/admin/${driverId}`, data);
+
+export const deleteDriver = (driverId: string) =>
+    api.delete(`/api/driver/admin/${driverId}`);
 
 // ─── Users ───────────────────────────────────────────────────────────────────
 
@@ -388,36 +388,26 @@ export interface CreateUserPayload {
     phone?: string;
 }
 
-const USER_ENDPOINTS = [
-    "/api/auth/admin/users",
-    "/api/auth/admin/users/",
-    "/api/auth/admin/user",
-    "/api/admin/users",
-    "/api/users",
-    "/api/user",
-];
+export interface UpdateUserPayload {
+    name?: string;
+    memberId?: string;
+    password?: string;
+    email?: string;
+    phone?: string;
+}
 
-const tryUserRequest = async <T>(method: "get" | "post", payload?: unknown) => {
-    let lastError: unknown;
-    for (const path of USER_ENDPOINTS) {
-        try {
-            if (method === "get") {
-                return await api.request<T>({ url: path, method: "get" });
-            }
-            return await api.request<T>({ url: path, method: "post", data: payload });
-        } catch (err: unknown) {
-            lastError = err;
-            const status = (err as { response?: { status?: number } })?.response?.status;
-            if (status !== 404) throw err;
-        }
-    }
-    throw lastError ?? new Error("User endpoint not found");
-};
-
-export const getUsers = () =>
-    tryUserRequest<{ users: User[] } | { data: User[] }>("get");
+export const getUsers = (q?: string) =>
+    api.get<{ users: User[] } | { data: User[] }>("/api/admin/users", {
+        params: q ? { q } : undefined,
+    });
 
 export const createUser = (data: CreateUserPayload) =>
-    tryUserRequest<{ user: User } | User>("post", data);
+    api.post<{ user: User } | User>("/api/auth/admin/users", data);
+
+export const updateUser = (userId: string, data: UpdateUserPayload) =>
+    api.put<{ user: User } | User>(`/api/admin/users/${userId}`, data);
+
+export const deleteUser = (userId: string) =>
+    api.delete(`/api/admin/users/${userId}`);
 
 export default api;

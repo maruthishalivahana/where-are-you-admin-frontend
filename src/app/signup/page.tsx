@@ -13,6 +13,7 @@ export default function SignupPage() {
     const [form, setForm] = useState({
         name: "",
         organizationName: "",
+        organizationSlug: "",
         email: "",
         password: "",
     });
@@ -96,6 +97,25 @@ export default function SignupPage() {
                                 value={form.organizationName}
                                 onChange={set("organizationName")}
                                 placeholder="Metropolitan Transit Authority"
+                                className="w-full px-4 py-2.5 pl-9 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                            />
+                        </div>
+                    </div>
+
+                    {/* Organization Slug */}
+                    <div className="space-y-1.5">
+                        <label className="text-sm font-semibold text-gray-700" htmlFor="orgSlug">
+                            Organization slug
+                        </label>
+                        <div className="relative">
+                            <Building2 className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                            <input
+                                id="orgSlug"
+                                type="text"
+                                required
+                                value={form.organizationSlug}
+                                onChange={set("organizationSlug")}
+                                placeholder="xyz-school-01"
                                 className="w-full px-4 py-2.5 pl-9 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
                             />
                         </div>

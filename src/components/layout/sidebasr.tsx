@@ -1,5 +1,6 @@
 ﻿"use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
@@ -13,6 +14,8 @@ import {
     LogOut,
     UserRound,
     UsersRound,
+    Copy,
+    Check,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
@@ -33,6 +36,16 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
     const pathname = usePathname();
     const router = useRouter();
     const { logout, user } = useAuth();
+    const [copied, setCopied] = useState(false);
+
+    const organizationSlug = user?.organizationSlug ?? user?.organization?.slug ?? "";
+
+    const copyOrganizationSlug = async () => {
+        if (!organizationSlug || typeof navigator === "undefined" || !navigator.clipboard) return;
+        await navigator.clipboard.writeText(organizationSlug);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+    };
 
     return (
         <>
@@ -181,6 +194,19 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                         >
                             <p className="text-sm font-semibold text-gray-900 truncate">{user?.name ?? "Admin"}</p>
                             <p className="text-xs text-gray-400 truncate">{user?.organizationName ?? "Administrator"}</p>
+                            {organizationSlug && (
+                                <div className="mt-1 inline-flex items-center gap-1.5 rounded-md bg-gray-100 px-1.5 py-1">
+                                    <span className="text-[10px] text-gray-600 truncate max-w-28">Org ID: {organizationSlug}</span>
+                                    <button
+                                        type="button"
+                                        onClick={copyOrganizationSlug}
+                                        className="text-gray-500 hover:text-blue-600 transition-colors"
+                                        title="Copy organization ID"
+                                    >
+                                        {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                                    </button>
+                                </div>
+                            )}
                         </div>
                     </div>
                     {/* Logout */}

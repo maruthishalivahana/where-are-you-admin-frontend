@@ -26,6 +26,7 @@ import {
     deleteRoute,
     createStop,
     deleteStop,
+    updateStop,
     Route as RouteType,
     Stop as StopType,
     LatLng,
@@ -38,7 +39,7 @@ const DEFAULT_CENTER = { lat: 17.385, lng: 78.4867 }; // Hyderabad, India
 // Must be a stable reference outside the component to prevent useJsApiLoader re-init
 const LIBRARIES: ("places" | "geometry")[] = ["places", "geometry"];
 
-type MarkerMode = "start" | "end" | "stop" | null;
+type MarkerMode = "start" | "end" | "stop" | "editStart" | "editEnd" | "editStop" | null;
 
 interface Toast {
     type: "success" | "error";
@@ -153,6 +154,10 @@ export default function RouteManagementPage() {
     const [routeDescription, setRouteDescription] = useState("");
     const [startName, setStartName] = useState("");
     const [endName, setEndName] = useState("");
+    const [startLatInput, setStartLatInput] = useState("");
+    const [startLngInput, setStartLngInput] = useState("");
+    const [endLatInput, setEndLatInput] = useState("");
+    const [endLngInput, setEndLngInput] = useState("");
     const [startLocation, setStartLocation] = useState<LatLng | null>(null);
     const [endLocation, setEndLocation] = useState<LatLng | null>(null);
     const [markerMode, setMarkerMode] = useState<MarkerMode>(null);
@@ -166,16 +171,31 @@ export default function RouteManagementPage() {
     const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
     const [stopName, setStopName] = useState("");
     const [stopLocation, setStopLocation] = useState<LatLng | null>(null);
+    const [stopSequenceOrder, setStopSequenceOrder] = useState("1");
+    const [stopRadiusMeters, setStopRadiusMeters] = useState("");
     const [addingStop, setAddingStop] = useState(false);
     const [routeStops, setRouteStops] = useState<Record<string, StopType[]>>({});
     const [deletingStopId, setDeletingStopId] = useState<string | null>(null);
+    const [editingStop, setEditingStop] = useState<StopType | null>(null);
+    const [editingStopName, setEditingStopName] = useState("");
+    const [editingStopLat, setEditingStopLat] = useState("");
+    const [editingStopLng, setEditingStopLng] = useState("");
+    const [editingStopSequence, setEditingStopSequence] = useState("1");
+    const [editingStopRadius, setEditingStopRadius] = useState("");
+    const [updatingStop, setUpdatingStop] = useState(false);
     const [mapRef, setMapRef] = useState<google.maps.Map | null>(null);
     const [routePathSource, setRoutePathSource] = useState<RoutePathSource>("none");
     const [routePathIssue, setRoutePathIssue] = useState("");
     const [detailNames, setDetailNames] = useState<{ start?: string; end?: string }>({});
 
+    const [editRouteName, setEditRouteName] = useState("");
     const [editStartName, setEditStartName] = useState("");
     const [editEndName, setEditEndName] = useState("");
+    const [editStartLat, setEditStartLat] = useState("");
+    const [editStartLng, setEditStartLng] = useState("");
+    const [editEndLat, setEditEndLat] = useState("");
+    const [editEndLng, setEditEndLng] = useState("");
+    const [editIsActive, setEditIsActive] = useState(true);
     const [updatingRoute, setUpdatingRoute] = useState(false);
     const routePolyline = useRef<google.maps.Polyline[]>([]);
     const stopMarkers = useRef<google.maps.Marker[]>([]);
@@ -654,12 +674,28 @@ export default function RouteManagementPage() {
             const pos = { lat: e.latLng.lat(), lng: e.latLng.lng() };
             if (markerMode === "start") {
                 setStartLocation(pos);
+                setStartLatInput(String(pos.lat));
+                setStartLngInput(String(pos.lng));
                 setMarkerMode("end"); // auto-advance to picking end
             } else if (markerMode === "end") {
                 setEndLocation(pos);
+                setEndLatInput(String(pos.lat));
+                setEndLngInput(String(pos.lng));
                 setMarkerMode(null);
             } else if (markerMode === "stop") {
                 setStopLocation(pos);
+                setMarkerMode(null);
+            } else if (markerMode === "editStart") {
+                setEditStartLat(String(pos.lat));
+                setEditStartLng(String(pos.lng));
+                setMarkerMode("editEnd");
+            } else if (markerMode === "editEnd") {
+                setEditEndLat(String(pos.lat));
+                setEditEndLng(String(pos.lng));
+                setMarkerMode(null);
+            } else if (markerMode === "editStop") {
+                setEditingStopLat(String(pos.lat));
+                setEditingStopLng(String(pos.lng));
                 setMarkerMode(null);
             }
         },
@@ -669,8 +705,23 @@ export default function RouteManagementPage() {
     // ─── Create route ──────────────────────────────────────────────────────
     const handleCreate = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!routeName.trim() || !startLocation || !endLocation) {
-            showToast("error", "Please provide a name and select both start and end locations on the map.");
+        const parsedStartLat = toNumber(startLatInput) ?? startLocation?.lat ?? null;
+        const parsedStartLng = toNumber(startLngInput) ?? startLocation?.lng ?? null;
+        const parsedEndLat = toNumber(endLatInput) ?? endLocation?.lat ?? null;
+        const parsedEndLng = toNumber(endLngInput) ?? endLocation?.lng ?? null;
+
+        if (!routeName.trim()) {
+            showToast("error", "Please provide a route name.");
+            return;
+        }
+
+        if (
+            parsedStartLat === null || parsedStartLng === null ||
+            parsedEndLat === null || parsedEndLng === null ||
+            !isValidCoordinate(parsedStartLat, parsedStartLng) ||
+            !isValidCoordinate(parsedEndLat, parsedEndLng)
+        ) {
+            showToast("error", "Start/End latitude and longitude must be valid numbers.");
             return;
         }
         setCreating(true);
@@ -679,10 +730,10 @@ export default function RouteManagementPage() {
             description: routeDescription.trim() || undefined,
             startName: startName.trim() || undefined,
             endName: endName.trim() || undefined,
-            startLat: startLocation.lat,
-            startLng: startLocation.lng,
-            endLat: endLocation.lat,
-            endLng: endLocation.lng,
+            startLat: parsedStartLat,
+            startLng: parsedStartLng,
+            endLat: parsedEndLat,
+            endLng: parsedEndLng,
         };
         console.log("📤 createRoute payload:", payload);
         try {
@@ -699,6 +750,10 @@ export default function RouteManagementPage() {
             setRouteDescription("");
             setStartName("");
             setEndName("");
+            setStartLatInput("");
+            setStartLngInput("");
+            setEndLatInput("");
+            setEndLngInput("");
             setStartLocation(null);
             setEndLocation(null);
             setDirections(null);
@@ -743,13 +798,34 @@ export default function RouteManagementPage() {
         }
     };
 
-    const handleUpdateRouteNames = async (e: React.FormEvent) => {
+    const handleUpdateRoute = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!selectedRouteId) return;
 
+        const parsedStartLat = toNumber(editStartLat);
+        const parsedStartLng = toNumber(editStartLng);
+        const parsedEndLat = toNumber(editEndLat);
+        const parsedEndLng = toNumber(editEndLng);
+
+        if (
+            parsedStartLat === null || parsedStartLng === null ||
+            parsedEndLat === null || parsedEndLng === null ||
+            !isValidCoordinate(parsedStartLat, parsedStartLng) ||
+            !isValidCoordinate(parsedEndLat, parsedEndLng)
+        ) {
+            showToast("error", "Route latitude/longitude must be valid numbers.");
+            return;
+        }
+
         const payload = {
+            name: editRouteName.trim() || undefined,
             startName: editStartName.trim() || undefined,
             endName: editEndName.trim() || undefined,
+            startLat: parsedStartLat,
+            startLng: parsedStartLng,
+            endLat: parsedEndLat,
+            endLng: parsedEndLng,
+            isActive: editIsActive,
         };
 
         try {
@@ -780,14 +856,28 @@ export default function RouteManagementPage() {
             showToast("error", "Enter a stop name and click the map to place it.");
             return;
         }
+
+        const parsedSequenceOrder = toNumber(stopSequenceOrder);
+        const parsedRadius = stopRadiusMeters.trim() ? toNumber(stopRadiusMeters) : null;
+
+        if (parsedSequenceOrder === null || !Number.isInteger(parsedSequenceOrder) || parsedSequenceOrder < 1) {
+            showToast("error", "Stop sequence order must be an integer >= 1.");
+            return;
+        }
+
+        if (parsedRadius !== null && parsedRadius <= 0) {
+            showToast("error", "Stop radius must be a positive number.");
+            return;
+        }
+
         setAddingStop(true);
         try {
-            const currentStops = routeStops[selectedRouteId] ?? [];
             const { data } = await createStop(selectedRouteId, {
                 name: stopName.trim(),
                 latitude: stopLocation.lat,
                 longitude: stopLocation.lng,
-                sequenceOrder: currentStops.length + 1,
+                sequenceOrder: parsedSequenceOrder,
+                radiusMeters: parsedRadius ?? undefined,
             });
             const stop = data.stop;
             setRouteStops((prev) => ({
@@ -796,6 +886,8 @@ export default function RouteManagementPage() {
             }));
             setStopName("");
             setStopLocation(null);
+            setStopSequenceOrder("1");
+            setStopRadiusMeters("");
             await fetchAndRenderSelectedRoute(selectedRouteId);
             showToast("success", `Stop “${stop.name}” added.`);
         } catch (err: unknown) {
@@ -839,6 +931,73 @@ export default function RouteManagementPage() {
         }
     };
 
+    const openEditStop = (stop: StopType) => {
+        setEditingStop(stop);
+        setEditingStopName(stop.name);
+        setEditingStopLat(String(stop.latitude));
+        setEditingStopLng(String(stop.longitude));
+        setEditingStopSequence(String(stop.sequenceOrder ?? 1));
+        setEditingStopRadius(stop.radiusMeters ? String(stop.radiusMeters) : "");
+    };
+
+    const handleUpdateStop = async () => {
+        if (!editingStop || !selectedRouteId) return;
+
+        const parsedLat = toNumber(editingStopLat);
+        const parsedLng = toNumber(editingStopLng);
+        const parsedSequence = toNumber(editingStopSequence);
+        const parsedRadius = editingStopRadius.trim() ? toNumber(editingStopRadius) : null;
+
+        if (!editingStopName.trim()) {
+            showToast("error", "Stop name is required.");
+            return;
+        }
+        if (parsedLat === null || parsedLng === null || !isValidCoordinate(parsedLat, parsedLng)) {
+            showToast("error", "Stop latitude/longitude must be valid numbers.");
+            return;
+        }
+        if (parsedSequence === null || !Number.isInteger(parsedSequence) || parsedSequence < 1) {
+            showToast("error", "Stop sequence order must be an integer >= 1.");
+            return;
+        }
+        if (parsedRadius !== null && parsedRadius <= 0) {
+            showToast("error", "Stop radius must be a positive number.");
+            return;
+        }
+
+        try {
+            setUpdatingStop(true);
+            const { data } = await updateStop(editingStop.id, {
+                name: editingStopName.trim(),
+                latitude: parsedLat,
+                longitude: parsedLng,
+                sequenceOrder: parsedSequence,
+                radiusMeters: parsedRadius ?? undefined,
+            });
+
+            const updatedStop = ((data as { stop?: StopType }).stop ?? data) as StopType;
+            setRouteStops((prev) => {
+                const existing = prev[selectedRouteId] ?? [];
+                return {
+                    ...prev,
+                    [selectedRouteId]: existing.map((stop) => (stop.id === editingStop.id ? { ...stop, ...updatedStop } : stop)),
+                };
+            });
+            setEditingStop(null);
+            setMarkerMode(null);
+            await fetchAndRenderSelectedRoute(selectedRouteId);
+            showToast("success", "Stop updated.");
+        } catch (err: unknown) {
+            const msg =
+                (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
+                (err as Error)?.message ??
+                "Failed to update stop.";
+            showToast("error", msg);
+        } finally {
+            setUpdatingStop(false);
+        }
+    };
+
     const mapCursor = markerMode ? "crosshair" : "grab";
     const selectedRoute = routes.find((r) => r._id === selectedRouteId) ?? null;
     const selectedStops = useMemo(
@@ -850,15 +1009,27 @@ export default function RouteManagementPage() {
 
     useEffect(() => {
         if (selectedRoute) {
+            setEditRouteName(selectedRoute.name ?? "");
             setEditStartName(selectedRoute.startName ?? "");
             setEditEndName(selectedRoute.endName ?? "");
+            setEditStartLat(Number.isFinite(selectedRoute.startLat) ? String(selectedRoute.startLat) : "");
+            setEditStartLng(Number.isFinite(selectedRoute.startLng) ? String(selectedRoute.startLng) : "");
+            setEditEndLat(Number.isFinite(selectedRoute.endLat) ? String(selectedRoute.endLat) : "");
+            setEditEndLng(Number.isFinite(selectedRoute.endLng) ? String(selectedRoute.endLng) : "");
+            setEditIsActive(selectedRoute.isActive ?? true);
             setDetailNames((prev) => ({
                 start: prev.start ?? selectedRoute.startName,
                 end: prev.end ?? selectedRoute.endName,
             }));
         } else {
+            setEditRouteName("");
             setEditStartName("");
             setEditEndName("");
+            setEditStartLat("");
+            setEditStartLng("");
+            setEditEndLat("");
+            setEditEndLng("");
+            setEditIsActive(true);
             setDetailNames({});
         }
     }, [selectedRoute]);
@@ -935,6 +1106,37 @@ export default function RouteManagementPage() {
                             </div>
 
                             <div className="grid grid-cols-2 gap-2">
+                                <input
+                                    type="text"
+                                    placeholder="Start lat"
+                                    value={startLatInput}
+                                    onChange={(e) => setStartLatInput(e.target.value)}
+                                    className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                                />
+                                <input
+                                    type="text"
+                                    placeholder="Start lng"
+                                    value={startLngInput}
+                                    onChange={(e) => setStartLngInput(e.target.value)}
+                                    className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                                />
+                                <input
+                                    type="text"
+                                    placeholder="End lat"
+                                    value={endLatInput}
+                                    onChange={(e) => setEndLatInput(e.target.value)}
+                                    className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                                />
+                                <input
+                                    type="text"
+                                    placeholder="End lng"
+                                    value={endLngInput}
+                                    onChange={(e) => setEndLngInput(e.target.value)}
+                                    className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                                />
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
                                 <button
                                     type="button"
                                     onClick={() => setMarkerMode("start")}
@@ -975,7 +1177,16 @@ export default function RouteManagementPage() {
                             {(startLocation || endLocation) && (
                                 <button
                                     type="button"
-                                    onClick={() => { setStartLocation(null); setEndLocation(null); setMarkerMode(null); setDirections(null); }}
+                                    onClick={() => {
+                                        setStartLocation(null);
+                                        setEndLocation(null);
+                                        setStartLatInput("");
+                                        setStartLngInput("");
+                                        setEndLatInput("");
+                                        setEndLngInput("");
+                                        setMarkerMode(null);
+                                        setDirections(null);
+                                    }}
                                     className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
                                 >
                                     Clear markers
@@ -1003,7 +1214,14 @@ export default function RouteManagementPage() {
                                 </div>
                                 <span className="text-xs font-semibold px-2 py-1 rounded-full bg-blue-100 text-blue-700 border border-blue-200">{selectedRoute.name}</span>
                             </div>
-                            <form onSubmit={handleUpdateRouteNames} className="space-y-2">
+                            <form onSubmit={handleUpdateRoute} className="space-y-2">
+                                <input
+                                    type="text"
+                                    placeholder="Route name"
+                                    value={editRouteName}
+                                    onChange={(e) => setEditRouteName(e.target.value)}
+                                    className="w-full px-3 py-2 bg-white border border-blue-100 rounded-lg text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                                />
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                                     <input
                                         type="text"
@@ -1020,13 +1238,68 @@ export default function RouteManagementPage() {
                                         className="w-full px-3 py-2 bg-white border border-blue-100 rounded-lg text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
                                     />
                                 </div>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <input
+                                        type="text"
+                                        placeholder="Start lat"
+                                        value={editStartLat}
+                                        onChange={(e) => setEditStartLat(e.target.value)}
+                                        className="w-full px-3 py-2 bg-white border border-blue-100 rounded-lg text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                                    />
+                                    <input
+                                        type="text"
+                                        placeholder="Start lng"
+                                        value={editStartLng}
+                                        onChange={(e) => setEditStartLng(e.target.value)}
+                                        className="w-full px-3 py-2 bg-white border border-blue-100 rounded-lg text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                                    />
+                                    <input
+                                        type="text"
+                                        placeholder="End lat"
+                                        value={editEndLat}
+                                        onChange={(e) => setEditEndLat(e.target.value)}
+                                        className="w-full px-3 py-2 bg-white border border-blue-100 rounded-lg text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                                    />
+                                    <input
+                                        type="text"
+                                        placeholder="End lng"
+                                        value={editEndLng}
+                                        onChange={(e) => setEditEndLng(e.target.value)}
+                                        className="w-full px-3 py-2 bg-white border border-blue-100 rounded-lg text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                                    />
+                                </div>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => setMarkerMode("editStart")}
+                                        className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-all ${markerMode === "editStart" ? "bg-green-600 border-green-600 text-white" : "bg-white border-green-200 text-green-700 hover:bg-green-50"}`}
+                                    >
+                                        {markerMode === "editStart" ? "Pick Start on Map..." : "Pick Start on Map"}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setMarkerMode("editEnd")}
+                                        className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-all ${markerMode === "editEnd" ? "bg-red-600 border-red-600 text-white" : "bg-white border-red-200 text-red-700 hover:bg-red-50"}`}
+                                    >
+                                        {markerMode === "editEnd" ? "Pick End on Map..." : "Pick End on Map"}
+                                    </button>
+                                </div>
+                                <label className="flex items-center gap-2 text-sm text-gray-700">
+                                    <input
+                                        type="checkbox"
+                                        checked={editIsActive}
+                                        onChange={(e) => setEditIsActive(e.target.checked)}
+                                        className="rounded border-gray-300"
+                                    />
+                                    Active route
+                                </label>
                                 <div className="flex items-center justify-end gap-2">
                                     <button
                                         type="submit"
                                         disabled={updatingRoute}
                                         className="px-3 py-2 rounded-lg text-sm font-semibold bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-60 disabled:cursor-not-allowed"
                                     >
-                                        {updatingRoute ? "Saving..." : "Save Names"}
+                                        {updatingRoute ? "Saving..." : "Save Route"}
                                     </button>
                                 </div>
                             </form>
@@ -1169,13 +1442,19 @@ export default function RouteManagementPage() {
                         )}
                         {markerMode && (
                             <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 bg-white shadow-lg rounded-xl px-4 py-2.5 text-sm font-semibold text-gray-800 flex items-center gap-2 border border-gray-200">
-                                <MapPin className={`w-4 h-4 ${markerMode === "start" ? "text-green-600"
-                                    : markerMode === "stop" ? "text-blue-600"
+                                <MapPin className={`w-4 h-4 ${(markerMode === "start" || markerMode === "editStart") ? "text-green-600"
+                                    : (markerMode === "stop" || markerMode === "editStop") ? "text-blue-600"
                                         : "text-red-500"
                                     }`} />
                                 {markerMode === "stop"
                                     ? "Click map to place stop"
-                                    : `Click map to set ${markerMode === "start" ? "start" : "end"} location`}
+                                    : markerMode === "editStop"
+                                        ? "Click map to update stop coordinates"
+                                        : markerMode === "editStart"
+                                            ? "Click map to update route start"
+                                            : markerMode === "editEnd"
+                                                ? "Click map to update route end"
+                                                : `Click map to set ${markerMode === "start" ? "start" : "end"} location`}
                             </div>
                         )}
 
@@ -1333,6 +1612,25 @@ export default function RouteManagementPage() {
                                                 : <><Plus className="w-3 h-3" />Add</>}
                                         </button>
                                     </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <input
+                                            type="number"
+                                            min={1}
+                                            step={1}
+                                            value={stopSequenceOrder}
+                                            onChange={(e) => setStopSequenceOrder(e.target.value)}
+                                            placeholder="Sequence order"
+                                            className="px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                                        />
+                                        <input
+                                            type="number"
+                                            min={1}
+                                            value={stopRadiusMeters}
+                                            onChange={(e) => setStopRadiusMeters(e.target.value)}
+                                            placeholder="Radius meters (optional)"
+                                            className="px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                                        />
+                                    </div>
                                 </form>
 
                                 {selectedStops.length === 0 ? (
@@ -1348,6 +1646,13 @@ export default function RouteManagementPage() {
                                                             <div className="inline-flex w-5 h-5 rounded-full bg-blue-600 text-white text-[10px] font-bold items-center justify-center mb-1">
                                                                 {stop.sequenceOrder || idx + 1}
                                                             </div>
+                                                            <button
+                                                                onClick={() => openEditStop(stop)}
+                                                                className="absolute top-1 right-7 w-5 h-5 rounded-md flex items-center justify-center text-gray-300 hover:text-blue-500 hover:bg-blue-50 transition-all"
+                                                                title="Edit stop"
+                                                            >
+                                                                <span className="text-[10px] font-bold">E</span>
+                                                            </button>
                                                             <button
                                                                 onClick={() => handleDeleteStop(stop.id, stop.name)}
                                                                 disabled={deletingStopId === stop.id}
@@ -1377,6 +1682,92 @@ export default function RouteManagementPage() {
                     </div>
                 </div>
             </div>
+
+            {editingStop && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4">
+                    <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-2xl space-y-3">
+                        <div className="flex items-start justify-between gap-3">
+                            <div>
+                                <p className="text-sm font-semibold text-gray-900">Edit Stop</p>
+                                <p className="text-xs text-gray-500">Update stop details and order.</p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => { setEditingStop(null); setMarkerMode(null); }}
+                                className="text-gray-400 hover:text-gray-600 text-sm"
+                            >
+                                Close
+                            </button>
+                        </div>
+
+                        <input
+                            type="text"
+                            value={editingStopName}
+                            onChange={(e) => setEditingStopName(e.target.value)}
+                            placeholder="Stop name"
+                            className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm"
+                        />
+                        <div className="grid grid-cols-2 gap-2">
+                            <input
+                                type="text"
+                                value={editingStopLat}
+                                onChange={(e) => setEditingStopLat(e.target.value)}
+                                placeholder="Latitude"
+                                className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm"
+                            />
+                            <input
+                                type="text"
+                                value={editingStopLng}
+                                onChange={(e) => setEditingStopLng(e.target.value)}
+                                placeholder="Longitude"
+                                className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm"
+                            />
+                            <input
+                                type="number"
+                                min={1}
+                                step={1}
+                                value={editingStopSequence}
+                                onChange={(e) => setEditingStopSequence(e.target.value)}
+                                placeholder="Sequence"
+                                className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm"
+                            />
+                            <input
+                                type="number"
+                                min={1}
+                                value={editingStopRadius}
+                                onChange={(e) => setEditingStopRadius(e.target.value)}
+                                placeholder="Radius (optional)"
+                                className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm"
+                            />
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setMarkerMode("editStop")}
+                            className={`w-full px-3 py-2 rounded-lg text-xs font-semibold border transition-all ${markerMode === "editStop" ? "bg-blue-600 border-blue-600 text-white" : "bg-white border-blue-200 text-blue-700 hover:bg-blue-50"}`}
+                        >
+                            {markerMode === "editStop" ? "Click map to pick stop coordinates..." : "Pick Stop Coordinates from Map"}
+                        </button>
+
+                        <div className="flex items-center justify-end gap-2 pt-1">
+                            <button
+                                type="button"
+                                onClick={() => { setEditingStop(null); setMarkerMode(null); }}
+                                className="px-3 py-2 rounded-lg text-sm border border-gray-200 text-gray-700 hover:bg-gray-50"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleUpdateStop}
+                                disabled={updatingStop}
+                                className="px-3 py-2 rounded-lg text-sm bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
+                            >
+                                {updatingStop ? "Saving..." : "Save Stop"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

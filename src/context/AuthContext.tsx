@@ -4,7 +4,6 @@ import {
     createContext,
     useContext,
     useState,
-    useEffect,
     useCallback,
     ReactNode,
 } from "react";
@@ -15,6 +14,12 @@ interface AdminUser {
     name: string;
     email: string;
     organizationName?: string;
+    organizationSlug?: string;
+    organization?: {
+        id?: string;
+        name?: string;
+        slug?: string;
+    };
 }
 
 interface AuthContextValue {
@@ -43,30 +48,31 @@ const extractAuthToken = (payload: { token?: string; accessToken?: string }): st
     return normalizeToken(payload.accessToken) ?? normalizeToken(payload.token);
 };
 
-export function AuthProvider({ children }: { children: ReactNode }) {
-    const [token, setToken] = useState<string | null>(null);
-    const [user, setUser] = useState<AdminUser | null>(null);
-    const [isLoading, setIsLoading] = useState(true);
+const normalizeAdminUser = (admin?: AdminUser | null): AdminUser | null => {
+    if (!admin) return null;
+    return {
+        ...admin,
+        organizationName: admin.organizationName ?? admin.organization?.name,
+        organizationSlug: admin.organizationSlug ?? admin.organization?.slug,
+    };
+};
 
-    // Hydrate from localStorage on client boot
-    useEffect(() => {
-        const stored = normalizeToken(localStorage.getItem("token"));
+export function AuthProvider({ children }: { children: ReactNode }) {
+    const [token, setToken] = useState<string | null>(() => {
+        if (typeof window === "undefined") return null;
+        return normalizeToken(localStorage.getItem("token"));
+    });
+    const [user, setUser] = useState<AdminUser | null>(() => {
+        if (typeof window === "undefined") return null;
         const storedUser = localStorage.getItem("admin_user");
-        if (stored) {
-            localStorage.setItem("token", stored);
-            setToken(stored);
-        } else {
-            localStorage.removeItem("token");
+        if (!storedUser) return null;
+        try {
+            return normalizeAdminUser(JSON.parse(storedUser));
+        } catch {
+            return null;
         }
-        if (storedUser) {
-            try {
-                setUser(JSON.parse(storedUser));
-            } catch {
-                // ignore corrupt data
-            }
-        }
-        setIsLoading(false);
-    }, []);
+    });
+    const isLoading = false;
 
     const persist = (tok: string, admin?: AdminUser | null) => {
         const normalized = normalizeToken(tok);
@@ -77,8 +83,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         localStorage.setItem("token", normalized);
         setToken(normalized);
         if (admin) {
-            localStorage.setItem("admin_user", JSON.stringify(admin));
-            setUser(admin);
+            const normalizedAdmin = normalizeAdminUser(admin);
+            localStorage.setItem("admin_user", JSON.stringify(normalizedAdmin));
+            setUser(normalizedAdmin);
         }
     };
 

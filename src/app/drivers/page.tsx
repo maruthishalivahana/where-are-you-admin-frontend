@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Plus, AlertCircle, CheckCircle } from "lucide-react";
+import { Plus, AlertCircle, CheckCircle, Pencil, Trash2, Loader2 } from "lucide-react";
 
 import { Header } from "@/components/layout/header";
 import { Card } from "@/components/ui/card";
@@ -15,14 +15,24 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Badge } from "@/components/ui/badge";
 import {
-  getDrivers,
-  createDriver,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   getBuses,
-  type Driver,
-  type CreateDriverPayload,
+  createDriver,
+  deleteDriver,
+  getDrivers,
+  updateDriver,
   type Bus,
+  type CreateDriverPayload,
+  type Driver,
+  type UpdateDriverPayload,
 } from "@/services/api";
 
 interface Toast {
@@ -30,203 +40,287 @@ interface Toast {
   message: string;
 }
 
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const getEntityId = (item: { _id?: string; id?: string }) => item._id ?? item.id ?? "";
+
+const extractDrivers = (input: unknown): Driver[] => {
+  if (Array.isArray(input)) return input as Driver[];
+  if (!input || typeof input !== "object") return [];
+
+  const obj = input as { drivers?: unknown; data?: unknown };
+  if (Array.isArray(obj.drivers)) return obj.drivers as Driver[];
+  if (Array.isArray(obj.data)) return obj.data as Driver[];
+  return [];
+};
+
+const getErrorMeta = (err: unknown, fallback: string) => {
+  const status = (err as { response?: { status?: number } })?.response?.status;
+  const message =
+    (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
+    (err as Error)?.message ||
+    fallback;
+  return { status, message };
+};
+
+const validatePayload = (payload: {
+  name: string;
+  memberId: string;
+  email?: string;
+  phone?: string;
+  password?: string;
+}) => {
+  if (payload.name.trim().length < 2) return "Name must be at least 2 characters.";
+  if (!payload.memberId.trim()) return "Member ID is required.";
+  if (payload.email && !EMAIL_REGEX.test(payload.email)) return "Please enter a valid email.";
+  if (payload.phone && (payload.phone.length < 7 || payload.phone.length > 20)) return "Phone length must be 7 to 20 characters.";
+  if (payload.password !== undefined && payload.password.length < 6) return "Password must be at least 6 characters.";
+  return null;
+};
+
+const normalizeCompare = (value?: string) => (value || "").trim().toLowerCase();
+
 export default function DriversPage() {
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [buses, setBuses] = useState<Bus[]>([]);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<Toast | null>(null);
 
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+
   const [openCreate, setOpenCreate] = useState(false);
+  const [openEdit, setOpenEdit] = useState(false);
+  const [openDelete, setOpenDelete] = useState(false);
+
+  const [selectedDriver, setSelectedDriver] = useState<Driver | null>(null);
+
   const [form, setForm] = useState<CreateDriverPayload>({
     name: "",
     memberId: "",
+    email: "",
+    phone: "",
     password: "",
   });
+  const [editForm, setEditForm] = useState<UpdateDriverPayload>({
+    name: "",
+    memberId: "",
+    email: "",
+    phone: "",
+    password: "",
+  });
+
   const [formError, setFormError] = useState<string | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
+
   const [submitting, setSubmitting] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const showToast = (type: Toast["type"], message: string) => {
     setToast({ type, message });
     setTimeout(() => setToast(null), 3200);
   };
 
-  const getErrorMessage = (err: unknown, fallback: string) => {
-    if (err && typeof err === "object" && "response" in err) {
-      const maybe = err as { response?: { data?: { message?: unknown } } };
-      const msg = maybe.response?.data?.message;
-      if (typeof msg === "string" && msg.trim()) return msg;
-    }
-    return fallback;
-  };
+  useEffect(() => {
+    const timer = setTimeout(() => setSearchQuery(searchInput.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
 
-  const extractList = <T,>(input: unknown, keys: string[]): T[] => {
-    if (Array.isArray(input)) return input as T[];
-    const seen = new Set<unknown>();
-    const queue: unknown[] = [];
-    if (input && typeof input === "object") queue.push(input);
-
-    while (queue.length) {
-      const current = queue.shift();
-      if (!current || typeof current !== "object" || seen.has(current)) continue;
-      seen.add(current);
-      const obj = current as Record<string, unknown>;
-
-      for (const key of keys) {
-        const value = obj[key];
-        if (Array.isArray(value)) return value as T[];
-        if (value && typeof value === "object") queue.push(value);
-      }
-
-      for (const value of Object.values(obj)) {
-        if (Array.isArray(value)) return value as T[];
-        if (value && typeof value === "object") queue.push(value);
-      }
-    }
-    return [];
-  };
-
-  const fetchAll = useCallback(async () => {
+  const fetchDrivers = useCallback(async (q?: string) => {
     setLoading(true);
     try {
-      const [driversRes, busesRes] = await Promise.allSettled([getDrivers(), getBuses()]);
-
-      let driverList: Driver[] = [];
-      let busList: Bus[] = [];
-
-      if (driversRes.status === "fulfilled") {
-        driverList = extractList<Driver>(driversRes.value.data, ["drivers", "data"]);
-      } else {
-        showToast("error", getErrorMessage(driversRes.reason, "Failed to load drivers"));
-      }
-
-      if (busesRes.status === "fulfilled") {
-        busList = extractList<Bus>(busesRes.value.data, ["buses", "data"]);
-      }
-
-      const extractBusDriverIds = (bus: Bus) => {
-        const typedBus = bus as unknown as {
-          driverId?: string | number;
-          driver_id?: string | number;
-          driverMemberId?: string | number;
-          driver_member_id?: string | number;
-          driver?: { memberId?: string | number; _id?: string | number; id?: string | number };
-        };
-
-        return [
-          typedBus.driverId,
-          typedBus.driver_id,
-          typedBus.driverMemberId,
-          typedBus.driver_member_id,
-          typedBus.driver?.memberId,
-          typedBus.driver?._id,
-          typedBus.driver?.id,
-        ].filter(Boolean) as Array<string | number>;
-      };
-
-      const assignmentMap = new Map<string, string>();
-      busList.forEach((bus) => {
-        const ids = extractBusDriverIds(bus);
-        ids.forEach((id) => assignmentMap.set(String(id), bus.numberPlate));
-      });
-
-      const driversWithAssignments = driverList.map((d) => {
-        const candidateKeys = [d.memberId, d._id, d.id].filter(Boolean) as Array<string | number>;
-        const assigned = candidateKeys.map((k) => assignmentMap.get(String(k))).find(Boolean);
-        const clone: Driver = { ...d };
-        if (assigned) clone.assignedBusNumber = assigned;
-        else if ("assignedBusNumber" in clone) delete (clone as { assignedBusNumber?: string }).assignedBusNumber;
-        return clone;
-      });
-
-      setDrivers(driversWithAssignments);
-      setBuses(busList);
+      const [driversRes, busesRes] = await Promise.all([getDrivers(q), getBuses()]);
+      setDrivers(extractDrivers(driversRes.data));
+      setBuses(Array.isArray(busesRes.data?.buses) ? busesRes.data.buses : []);
     } catch (err) {
-      console.error("Failed to load drivers:", err);
-      showToast("error", getErrorMessage(err, "Failed to load drivers"));
+      const { message } = getErrorMeta(err, "Failed to load drivers.");
+      showToast("error", message);
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchAll();
-  }, [fetchAll]);
+    fetchDrivers(searchQuery || undefined);
+  }, [fetchDrivers, searchQuery]);
 
-  const assignedBusByDriverId = useMemo(() => {
+  const busNumberById = useMemo(() => {
     const map = new Map<string, string>();
     buses.forEach((bus) => {
-      const typedBus = bus as unknown as {
-        driverId?: string | number;
-        driver_id?: string | number;
-        driverMemberId?: string | number;
-        driver_member_id?: string | number;
-        driver?: { memberId?: string | number; _id?: string | number; id?: string | number };
-      };
-      const ids = [
-        typedBus.driverId,
-        typedBus.driver_id,
-        typedBus.driverMemberId,
-        typedBus.driver_member_id,
-        typedBus.driver?.memberId,
-        typedBus.driver?._id,
-        typedBus.driver?.id,
-      ].filter(Boolean) as Array<string | number>;
-
-      ids.forEach((id) => map.set(String(id), bus.numberPlate));
+      if (bus._id) map.set(String(bus._id), bus.numberPlate);
+      if (bus.id) map.set(String(bus.id), bus.numberPlate);
     });
     return map;
   }, [buses]);
 
-  const assignedDrivers = drivers.filter((d) => {
-    const ids = [d.memberId, d._id, d.id].filter(Boolean) as Array<string | number>;
-    return ids.some((id) => assignedBusByDriverId.has(String(id)));
-  }).length;
+  const stats = useMemo(() => {
+    const assigned = drivers.filter((d) => Boolean(d.assignedBusNumber || (d.assignedBusId && busNumberById.get(String(d.assignedBusId))))).length;
+    return { total: drivers.length, assigned, unassigned: drivers.length - assigned };
+  }, [drivers, busNumberById]);
 
   const handleCreate = async () => {
     setFormError(null);
-    const trimmed = {
+    const payload: CreateDriverPayload = {
       name: form.name.trim(),
       memberId: form.memberId.trim(),
+      email: form.email?.trim() || undefined,
+      phone: form.phone?.trim() || undefined,
       password: form.password.trim(),
     };
-    if (!trimmed.name || !trimmed.memberId || !trimmed.password) {
-      setFormError("All fields are required");
+
+    const validationError = validatePayload(payload);
+    if (validationError) {
+      setFormError(validationError);
       return;
     }
 
     try {
       setSubmitting(true);
-      const { data } = await createDriver(trimmed);
-      const createdResponse = data as unknown;
-      const created =
-        (createdResponse as { driver?: Driver }).driver ?? (createdResponse as Driver);
+      const { data } = await createDriver(payload);
+      const created = ((data as { driver?: Driver }).driver ?? data) as Driver;
       setDrivers((prev) => [created, ...prev]);
-      showToast("success", "Driver created");
-      setForm({ name: "", memberId: "", password: "" });
       setOpenCreate(false);
+      setForm({ name: "", memberId: "", email: "", phone: "", password: "" });
+      showToast("success", "Driver created successfully.");
     } catch (err) {
-      setFormError(getErrorMessage(err, "Failed to create driver"));
+      const { message } = getErrorMeta(err, "Failed to create driver.");
+      setFormError(message);
     } finally {
       setSubmitting(false);
     }
   };
 
+  const openEditModal = (driver: Driver) => {
+    setSelectedDriver(driver);
+    setEditError(null);
+    setEditForm({
+      name: driver.name,
+      memberId: driver.memberId ?? "",
+      email: driver.email ?? "",
+      phone: driver.phone ?? "",
+      password: "",
+    });
+    setOpenEdit(true);
+  };
+
+  const handleUpdate = async () => {
+    if (!selectedDriver) return;
+    setEditError(null);
+    const driverId = getEntityId(selectedDriver);
+
+    const payload: UpdateDriverPayload = {
+      name: editForm.name?.trim() || undefined,
+      memberId: editForm.memberId?.trim() || undefined,
+      email: editForm.email?.trim() || undefined,
+      phone: editForm.phone?.trim() || undefined,
+      password: editForm.password?.trim() || undefined,
+    };
+
+    const validationError = validatePayload({
+      name: payload.name || "",
+      memberId: payload.memberId || "",
+      email: payload.email,
+      phone: payload.phone,
+      password: payload.password,
+    });
+    if (validationError) {
+      setEditError(validationError);
+      return;
+    }
+
+    const duplicateField = drivers
+      .filter((driver) => getEntityId(driver) !== driverId)
+      .find((driver) => {
+        const sameMemberId = Boolean(payload.memberId) && normalizeCompare(driver.memberId) === normalizeCompare(payload.memberId);
+        const sameEmail = Boolean(payload.email) && normalizeCompare(driver.email) === normalizeCompare(payload.email);
+        const samePhone = Boolean(payload.phone) && normalizeCompare(driver.phone) === normalizeCompare(payload.phone);
+        return sameMemberId || sameEmail || samePhone;
+      });
+
+    if (duplicateField) {
+      if (normalizeCompare(duplicateField.memberId) === normalizeCompare(payload.memberId)) {
+        setEditError("Member ID must be unique in your organization.");
+      } else if (normalizeCompare(duplicateField.email) === normalizeCompare(payload.email)) {
+        setEditError("Email must be unique in your organization.");
+      } else {
+        setEditError("Phone number must be unique in your organization.");
+      }
+      return;
+    }
+
+    try {
+      setEditing(true);
+      const { data } = await updateDriver(driverId, payload);
+      const updated = ((data as { driver?: Driver }).driver ?? data) as Driver;
+
+      setDrivers((prev) => prev.map((d) => (getEntityId(d) === driverId ? { ...d, ...updated } : d)));
+      setOpenEdit(false);
+      setSelectedDriver(null);
+      showToast("success", "Driver updated successfully.");
+    } catch (err) {
+      const { status, message } = getErrorMeta(err, "Failed to update driver.");
+      if (status === 404) {
+        setOpenEdit(false);
+        setSelectedDriver(null);
+        await fetchDrivers(searchQuery || undefined);
+        showToast("error", "Driver no longer exists. List refreshed.");
+        return;
+      }
+      setEditError(message);
+    } finally {
+      setEditing(false);
+    }
+  };
+
+  const requestDelete = (driver: Driver) => {
+    setSelectedDriver(driver);
+    setOpenDelete(true);
+  };
+
+  const handleDelete = async () => {
+    if (!selectedDriver) return;
+
+    try {
+      setDeleting(true);
+      const driverId = getEntityId(selectedDriver);
+      await deleteDriver(driverId);
+      setDrivers((prev) => prev.filter((d) => getEntityId(d) !== driverId));
+      setOpenDelete(false);
+      setSelectedDriver(null);
+      showToast("success", "Driver deleted.");
+    } catch (err) {
+      const { status, message } = getErrorMeta(err, "Failed to delete driver.");
+      if (status === 404) {
+        setOpenDelete(false);
+        setSelectedDriver(null);
+        await fetchDrivers(searchQuery || undefined);
+        showToast("error", "Driver was already removed. List refreshed.");
+        return;
+      }
+      showToast("error", message);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   return (
     <>
-      <Header onToggleSidebar={() => { }} />
+      <Header onToggleSidebar={() => {}} />
 
-      {/* Toast */}
       {toast && (
         <div
-          className={`fixed bottom-5 right-5 z-50 flex items-center gap-2.5 px-4 py-3 rounded-xl shadow-lg text-sm font-medium transition-all
-          ${toast.type === "success"
+          className={`fixed bottom-5 right-5 z-50 flex items-center gap-2.5 px-4 py-3 rounded-xl shadow-lg text-sm font-medium transition-all ${
+            toast.type === "success"
               ? "bg-green-50 border border-green-200 text-green-800"
               : "bg-red-50 border border-red-200 text-red-800"
-            }`}
+          }`}
         >
-          {toast.type === "success"
-            ? <CheckCircle className="w-4 h-4 text-green-600 shrink-0" />
-            : <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />}
+          {toast.type === "success" ? (
+            <CheckCircle className="w-4 h-4 text-green-600 shrink-0" />
+          ) : (
+            <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
+          )}
           {toast.message}
         </div>
       )}
@@ -235,12 +329,9 @@ export default function DriversPage() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-3xl font-semibold text-gray-900">Driver Management</h1>
-            <p className="text-sm text-gray-500">Monitor fleet compliance, assignments, and add new drivers.</p>
+            <p className="text-sm text-gray-500">Create, update, search, and delete drivers.</p>
           </div>
-          <Button
-            className="gap-2 bg-blue-600 hover:bg-blue-700 text-white"
-            onClick={() => setOpenCreate(true)}
-          >
+          <Button className="gap-2 bg-blue-600 hover:bg-blue-700 text-white" onClick={() => setOpenCreate(true)}>
             <Plus className="w-4 h-4" />
             Add Driver
           </Button>
@@ -248,65 +339,71 @@ export default function DriversPage() {
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <Card className="p-4">
-            <p className="text-xs text-gray-500">Assigned Drivers</p>
-            <p className="text-2xl font-semibold text-gray-900">{assignedDrivers}</p>
+            <p className="text-xs text-gray-500">Total Drivers</p>
+            <p className="text-2xl font-semibold text-gray-900">{stats.total}</p>
           </Card>
           <Card className="p-4">
-            <p className="text-xs text-gray-500">Unassigned Drivers</p>
-            <p className="text-2xl font-semibold text-gray-900">{drivers.length - assignedDrivers}</p>
+            <p className="text-xs text-gray-500">Assigned</p>
+            <p className="text-2xl font-semibold text-gray-900">{stats.assigned}</p>
           </Card>
           <Card className="p-4">
-            <p className="text-xs text-gray-500">Total</p>
-            <p className="text-2xl font-semibold text-gray-900">{drivers.length}</p>
+            <p className="text-xs text-gray-500">Unassigned</p>
+            <p className="text-2xl font-semibold text-gray-900">{stats.unassigned}</p>
           </Card>
         </div>
 
-        <Card className="rounded-xl border border-gray-200 shadow-sm">
-          <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-            <div>
-              <p className="text-sm font-semibold text-gray-900">Drivers</p>
-              <p className="text-xs text-gray-500">Showing {drivers.length} driver{drivers.length === 1 ? "" : "s"}</p>
-            </div>
+        <Card className="p-4 border border-gray-200 shadow-sm space-y-4">
+          <div className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+            <Input
+              placeholder="Search drivers by name, member ID, email, phone"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              className="h-10 w-full sm:w-96"
+            />
+            <Button variant="outline" onClick={() => setSearchInput("")}>Clear</Button>
           </div>
 
-          <div className="overflow-x-auto">
+          <div className="rounded-lg border border-gray-200 overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
-                  <TableHead className="text-xs uppercase tracking-wide text-gray-500">Name</TableHead>
-                  <TableHead className="text-xs uppercase tracking-wide text-gray-500">Member ID</TableHead>
-                  <TableHead className="text-xs uppercase tracking-wide text-gray-500">Assigned Bus</TableHead>
-                  <TableHead className="text-xs uppercase tracking-wide text-gray-500">Assignment Status</TableHead>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Member ID</TableHead>
+                  <TableHead>Email</TableHead>
+                  <TableHead>Phone</TableHead>
+                  <TableHead>Assigned Bus</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {loading ? (
                   <TableRow>
-                    <TableCell colSpan={4} className="py-8 text-center text-gray-500">Loading drivers...</TableCell>
+                    <TableCell colSpan={6} className="py-10 text-center text-gray-500">Loading drivers...</TableCell>
                   </TableRow>
                 ) : drivers.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={4} className="py-8 text-center text-gray-500">No drivers yet. Add one to get started.</TableCell>
+                    <TableCell colSpan={6} className="py-10 text-center text-gray-500">No drivers found.</TableCell>
                   </TableRow>
                 ) : (
                   drivers.map((driver) => {
-                    const id = String(driver._id || driver.id || "");
-                    const assignedBus = assignedBusByDriverId.get(id) || driver.assignedBusNumber;
+                    const id = getEntityId(driver);
+                    const assignedBus = driver.assignedBusNumber || (driver.assignedBusId ? busNumberById.get(String(driver.assignedBusId)) : undefined);
                     return (
-                      <TableRow key={id || driver.memberId || driver.name} className="hover:bg-gray-50/70">
-                        <TableCell className="font-semibold text-gray-900">{driver.name}</TableCell>
-                        <TableCell className="text-sm text-gray-700">{driver.memberId || "—"}</TableCell>
-                        <TableCell>
-                          {assignedBus ? (
-                            <Badge variant="secondary" className="border-gray-300 bg-white text-blue-600">{assignedBus}</Badge>
-                          ) : (
-                            <span className="text-sm text-gray-400">Unassigned</span>
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <Badge className={`rounded-full border-0 ${assignedBus ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-800"}`}>
-                            {assignedBus ? "Assigned" : "Unassigned"}
-                          </Badge>
+                      <TableRow key={id || `${driver.memberId}-${driver.name}`} className="hover:bg-gray-50/60">
+                        <TableCell className="font-medium text-gray-900">{driver.name}</TableCell>
+                        <TableCell>{driver.memberId || "-"}</TableCell>
+                        <TableCell>{driver.email || "-"}</TableCell>
+                        <TableCell>{driver.phone || "-"}</TableCell>
+                        <TableCell>{assignedBus || "Unassigned"}</TableCell>
+                        <TableCell className="text-right">
+                          <div className="inline-flex items-center gap-2">
+                            <Button variant="outline" size="sm" onClick={() => openEditModal(driver)}>
+                              <Pencil className="w-3.5 h-3.5 mr-1" />Edit
+                            </Button>
+                            <Button variant="outline" size="sm" onClick={() => requestDelete(driver)}>
+                              <Trash2 className="w-3.5 h-3.5 mr-1" />Delete
+                            </Button>
+                          </div>
                         </TableCell>
                       </TableRow>
                     );
@@ -318,65 +415,72 @@ export default function DriversPage() {
         </Card>
       </main>
 
-      {/* Create Driver Drawer/Dialog */}
-      {openCreate && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 px-4">
-          <div className="w-full max-w-md rounded-2xl bg-white shadow-2xl p-6 space-y-4">
-            <div className="flex items-start justify-between">
-              <div>
-                <h2 className="text-lg font-semibold text-gray-900">Add Driver</h2>
-                <p className="text-sm text-gray-500">Create a driver with member ID and password.</p>
-              </div>
-              <button onClick={() => setOpenCreate(false)} className="text-gray-400 hover:text-gray-600">✕</button>
-            </div>
+      <Dialog open={openCreate} onOpenChange={setOpenCreate}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Create Driver</DialogTitle>
+            <DialogDescription>Add a new driver account.</DialogDescription>
+          </DialogHeader>
 
-            {formError ? (
-              <div className="flex items-start gap-2 bg-red-50 border border-red-100 text-red-700 text-sm rounded-xl px-3 py-2">
-                <AlertCircle className="w-4 h-4 mt-0.5" />
-                <span>{formError}</span>
-              </div>
-            ) : null}
-
-            <div className="space-y-3">
-              <div className="space-y-1">
-                <label className="text-sm font-medium text-gray-700">Name</label>
-                <Input
-                  value={form.name}
-                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                  placeholder="Driver name"
-                  className="rounded-lg"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-sm font-medium text-gray-700">Member ID</label>
-                <Input
-                  value={form.memberId}
-                  onChange={(e) => setForm((f) => ({ ...f, memberId: e.target.value }))}
-                  placeholder="e.g., D2002"
-                  className="rounded-lg"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-sm font-medium text-gray-700">Password</label>
-                <Input
-                  type="password"
-                  value={form.password}
-                  onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
-                  placeholder="Driver@123"
-                  className="rounded-lg"
-                />
-              </div>
-            </div>
-
-            <div className="flex justify-end gap-2 pt-2">
-              <Button variant="outline" onClick={() => setOpenCreate(false)} className="rounded-lg">Cancel</Button>
-              <Button onClick={handleCreate} disabled={submitting} className="rounded-lg bg-blue-600 hover:bg-blue-700">
-                {submitting ? "Saving..." : "Save Driver"}
-              </Button>
-            </div>
+          <div className="space-y-3">
+            <Input value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} placeholder="Name" />
+            <Input value={form.memberId} onChange={(e) => setForm((p) => ({ ...p, memberId: e.target.value }))} placeholder="Member ID" />
+            <Input type="email" value={form.email || ""} onChange={(e) => setForm((p) => ({ ...p, email: e.target.value }))} placeholder="Email (optional)" />
+            <Input value={form.phone || ""} onChange={(e) => setForm((p) => ({ ...p, phone: e.target.value }))} placeholder="Phone (optional)" />
+            <Input type="password" value={form.password} onChange={(e) => setForm((p) => ({ ...p, password: e.target.value }))} placeholder="Password" />
+            {formError && <p className="text-sm text-red-600">{formError}</p>}
           </div>
-        </div>
-      )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpenCreate(false)}>Cancel</Button>
+            <Button onClick={handleCreate} disabled={submitting} className="bg-blue-600 hover:bg-blue-700 text-white">
+              {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : "Create Driver"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={openEdit} onOpenChange={setOpenEdit}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Edit Driver</DialogTitle>
+            <DialogDescription>Update driver details. Set password only if you want to reset it.</DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            <Input value={editForm.name || ""} onChange={(e) => setEditForm((p) => ({ ...p, name: e.target.value }))} placeholder="Name" />
+            <Input value={editForm.memberId || ""} onChange={(e) => setEditForm((p) => ({ ...p, memberId: e.target.value }))} placeholder="Member ID" />
+            <Input type="email" value={editForm.email || ""} onChange={(e) => setEditForm((p) => ({ ...p, email: e.target.value }))} placeholder="Email (optional)" />
+            <Input value={editForm.phone || ""} onChange={(e) => setEditForm((p) => ({ ...p, phone: e.target.value }))} placeholder="Phone (optional)" />
+            <Input type="password" value={editForm.password || ""} onChange={(e) => setEditForm((p) => ({ ...p, password: e.target.value }))} placeholder="New password (optional)" />
+            {editError && <p className="text-sm text-red-600">{editError}</p>}
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpenEdit(false)}>Cancel</Button>
+            <Button onClick={handleUpdate} disabled={editing} className="bg-blue-600 hover:bg-blue-700 text-white">
+              {editing ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save Changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={openDelete} onOpenChange={setOpenDelete}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete Driver</DialogTitle>
+            <DialogDescription>
+              This action cannot be undone. Delete {selectedDriver?.name || "this driver"}?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpenDelete(false)}>Cancel</Button>
+            <Button onClick={handleDelete} disabled={deleting} className="bg-red-600 hover:bg-red-700 text-white">
+              {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

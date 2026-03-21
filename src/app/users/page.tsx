@@ -1,12 +1,12 @@
-"use client"
+"use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react"
-import { Plus, AlertCircle, CheckCircle, MoreHorizontal } from "lucide-react"
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Plus, AlertCircle, CheckCircle, Pencil, Trash2, Loader2 } from "lucide-react";
 
-import { Header } from "@/components/layout/header"
-import { Card } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { Header } from "@/components/layout/header";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -14,187 +14,309 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "@/components/ui/table"
+} from "@/components/ui/table";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogFooter,
-  DialogDescription,
-} from "@/components/ui/dialog"
-import { Badge } from "@/components/ui/badge"
-import { createUser, getUsers, type CreateUserPayload, type User } from "@/services/api"
+} from "@/components/ui/dialog";
+import {
+  createUser,
+  deleteUser,
+  getUsers,
+  updateUser,
+  type CreateUserPayload,
+  type UpdateUserPayload,
+  type User,
+} from "@/services/api";
 
 interface Toast {
-  type: "success" | "error"
-  message: string
+  type: "success" | "error";
+  message: string;
 }
 
-const getErrorMessage = (err: unknown, fallback: string) => {
-  if (err && typeof err === "object" && "response" in err) {
-    const maybe = err as { response?: { data?: { message?: unknown } } }
-    const msg = maybe.response?.data?.message
-    if (typeof msg === "string" && msg.trim()) return msg
-  }
-  return fallback
-}
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-const extractList = <T,>(input: unknown, keys: string[]): T[] => {
-  if (Array.isArray(input)) return input as T[]
-  const seen = new Set<unknown>()
-  const queue: unknown[] = []
-  if (input && typeof input === "object") queue.push(input)
-
-  while (queue.length) {
-    const current = queue.shift()
-    if (!current || typeof current !== "object" || seen.has(current)) continue
-    seen.add(current)
-    const obj = current as Record<string, unknown>
-
-    for (const key of keys) {
-      const value = obj[key]
-      if (Array.isArray(value)) return value as T[]
-      if (value && typeof value === "object") queue.push(value)
-    }
-
-    for (const value of Object.values(obj)) {
-      if (Array.isArray(value)) return value as T[]
-      if (value && typeof value === "object") queue.push(value)
-    }
-  }
-  return []
-}
+const getEntityId = (item: { _id?: string; id?: string }) => item._id ?? item.id ?? "";
 
 const formatDate = (value?: string) => {
-  if (!value) return "—"
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return "—"
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
-}
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+};
 
-const initials = (name?: string) => {
-  if (!name) return "?"
-  return name
-    .split(" ")
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("")
-}
+const extractUsers = (input: unknown): User[] => {
+  if (Array.isArray(input)) return input as User[];
+  if (!input || typeof input !== "object") return [];
+
+  const obj = input as { users?: unknown; data?: unknown };
+  if (Array.isArray(obj.users)) return obj.users as User[];
+  if (Array.isArray(obj.data)) return obj.data as User[];
+  return [];
+};
+
+const getErrorMeta = (err: unknown, fallback: string) => {
+  const status = (err as { response?: { status?: number } })?.response?.status;
+  const message =
+    (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
+    (err as Error)?.message ||
+    fallback;
+  return { status, message };
+};
+
+const validatePayload = (payload: {
+  name: string;
+  memberId: string;
+  email?: string;
+  phone?: string;
+  password?: string;
+}) => {
+  if (payload.name.trim().length < 2) return "Name must be at least 2 characters.";
+  if (!payload.memberId.trim()) return "Member ID is required.";
+  if (payload.email && !EMAIL_REGEX.test(payload.email)) return "Please enter a valid email.";
+  if (payload.phone && (payload.phone.length < 7 || payload.phone.length > 20)) return "Phone length must be 7 to 20 characters.";
+  if (payload.password !== undefined && payload.password.length < 6) return "Password must be at least 6 characters.";
+  return null;
+};
+
+const normalizeCompare = (value?: string) => (value || "").trim().toLowerCase();
 
 export default function UsersPage() {
-  const [users, setUsers] = useState<User[]>([])
-  const [loading, setLoading] = useState(true)
-  const [toast, setToast] = useState<Toast | null>(null)
+  const [users, setUsers] = useState<User[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [toast, setToast] = useState<Toast | null>(null);
 
-  const [search, setSearch] = useState("")
-  const [roleFilter, setRoleFilter] = useState("All Roles")
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
 
-  const [openCreate, setOpenCreate] = useState(false)
+  const [openCreate, setOpenCreate] = useState(false);
+  const [openEdit, setOpenEdit] = useState(false);
+  const [openDelete, setOpenDelete] = useState(false);
+
+  const [selectedUser, setSelectedUser] = useState<User | null>(null);
+
   const [form, setForm] = useState<CreateUserPayload>({
     name: "",
     memberId: "",
     password: "",
     email: "",
     phone: "",
-  })
-  const [formError, setFormError] = useState<string | null>(null)
-  const [submitting, setSubmitting] = useState(false)
+  });
+  const [editForm, setEditForm] = useState<UpdateUserPayload>({
+    name: "",
+    memberId: "",
+    email: "",
+    phone: "",
+    password: "",
+  });
+
+  const [formError, setFormError] = useState<string | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  const [submitting, setSubmitting] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const showToast = (type: Toast["type"], message: string) => {
-    setToast({ type, message })
-    setTimeout(() => setToast(null), 3200)
-  }
-
-  const fetchUsers = useCallback(async () => {
-    setLoading(true)
-    try {
-      const res = await getUsers()
-      const list = extractList<User>(res.data, ["users", "data"])
-      setUsers(list)
-    } catch (err) {
-      console.error("Failed to load users", err)
-      showToast("error", getErrorMessage(err, "Failed to load users"))
-    } finally {
-      setLoading(false)
-    }
-  }, [])
+    setToast({ type, message });
+    setTimeout(() => setToast(null), 3200);
+  };
 
   useEffect(() => {
-    fetchUsers()
-  }, [fetchUsers])
+    const timer = setTimeout(() => setSearchQuery(searchInput.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
 
-  const totalUsers = users.length
-  const adminCount = users.filter(u => (u.role ?? "").toLowerCase() === "admin").length
-  const memberCount = users.filter(u => (u.role ?? "").toLowerCase() === "member").length
+  const fetchUsers = useCallback(async (q?: string) => {
+    setLoading(true);
+    try {
+      const res = await getUsers(q);
+      setUsers(extractUsers(res.data));
+    } catch (err) {
+      const { message } = getErrorMeta(err, "Failed to load users.");
+      showToast("error", message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  const uniqueRoles = useMemo(() => {
-    const roles = new Set<string>()
-    users.forEach(u => {
-      if (u.role) roles.add(u.role)
-    })
-    return ["All Roles", ...Array.from(roles)]
-  }, [users])
+  useEffect(() => {
+    fetchUsers(searchQuery || undefined);
+  }, [fetchUsers, searchQuery]);
 
-  const filteredUsers = useMemo(() => {
-    const query = search.trim().toLowerCase()
-    return users.filter((u) => {
-      const matchesQuery = !query || [u.name, u.email, u.phone, u.memberId]
-        .filter(Boolean)
-        .some((value) => (value as string).toLowerCase().includes(query))
-      const matchesRole = roleFilter === "All Roles" || (u.role ?? "").toLowerCase() === roleFilter.toLowerCase()
-      return matchesQuery && matchesRole
-    })
-  }, [users, search, roleFilter])
+  const stats = useMemo(() => {
+    const withEmail = users.filter((u) => Boolean(u.email)).length;
+    const withPhone = users.filter((u) => Boolean(u.phone)).length;
+    return { total: users.length, withEmail, withPhone };
+  }, [users]);
 
   const handleCreate = async () => {
-    setFormError(null)
-    const trimmed = {
+    setFormError(null);
+    const payload: CreateUserPayload = {
       name: form.name.trim(),
       memberId: form.memberId.trim(),
       password: form.password.trim(),
       email: form.email?.trim() || undefined,
       phone: form.phone?.trim() || undefined,
-    }
+    };
 
-    if (!trimmed.name || !trimmed.memberId || !trimmed.password) {
-      setFormError("Name, Member ID, and Password are required")
-      return
+    const validationError = validatePayload(payload);
+    if (validationError) {
+      setFormError(validationError);
+      return;
     }
 
     try {
-      setSubmitting(true)
-      const { data } = await createUser(trimmed)
-      const createdResponse = data as unknown
-      const created = (createdResponse as { user?: User }).user ?? (createdResponse as User)
-      setUsers(prev => [created, ...prev])
-      showToast("success", "User created")
-      setOpenCreate(false)
-      setForm({ name: "", memberId: "", password: "", email: "", phone: "" })
+      setSubmitting(true);
+      const { data } = await createUser(payload);
+      const created = ((data as { user?: User }).user ?? data) as User;
+      setUsers((prev) => [created, ...prev]);
+      setOpenCreate(false);
+      setForm({ name: "", memberId: "", password: "", email: "", phone: "" });
+      showToast("success", "User created successfully.");
     } catch (err) {
-      setFormError(getErrorMessage(err, "Failed to create user"))
+      const { message } = getErrorMeta(err, "Failed to create user.");
+      setFormError(message);
     } finally {
-      setSubmitting(false)
+      setSubmitting(false);
     }
-  }
+  };
+
+  const openEditModal = (user: User) => {
+    setSelectedUser(user);
+    setEditError(null);
+    setEditForm({
+      name: user.name,
+      memberId: user.memberId ?? "",
+      email: user.email ?? "",
+      phone: user.phone ?? "",
+      password: "",
+    });
+    setOpenEdit(true);
+  };
+
+  const handleUpdate = async () => {
+    if (!selectedUser) return;
+    setEditError(null);
+    const userId = getEntityId(selectedUser);
+
+    const payload: UpdateUserPayload = {
+      name: editForm.name?.trim() || undefined,
+      memberId: editForm.memberId?.trim() || undefined,
+      email: editForm.email?.trim() || undefined,
+      phone: editForm.phone?.trim() || undefined,
+      password: editForm.password?.trim() || undefined,
+    };
+
+    const validationError = validatePayload({
+      name: payload.name || "",
+      memberId: payload.memberId || "",
+      email: payload.email,
+      phone: payload.phone,
+      password: payload.password,
+    });
+
+    if (validationError) {
+      setEditError(validationError);
+      return;
+    }
+
+    const duplicateField = users
+      .filter((user) => getEntityId(user) !== userId)
+      .find((user) => {
+        const sameMemberId = Boolean(payload.memberId) && normalizeCompare(user.memberId) === normalizeCompare(payload.memberId);
+        const sameEmail = Boolean(payload.email) && normalizeCompare(user.email) === normalizeCompare(payload.email);
+        const samePhone = Boolean(payload.phone) && normalizeCompare(user.phone) === normalizeCompare(payload.phone);
+        return sameMemberId || sameEmail || samePhone;
+      });
+
+    if (duplicateField) {
+      if (normalizeCompare(duplicateField.memberId) === normalizeCompare(payload.memberId)) {
+        setEditError("Member ID must be unique in your organization.");
+      } else if (normalizeCompare(duplicateField.email) === normalizeCompare(payload.email)) {
+        setEditError("Email must be unique in your organization.");
+      } else {
+        setEditError("Phone number must be unique in your organization.");
+      }
+      return;
+    }
+
+    try {
+      setEditing(true);
+      const { data } = await updateUser(userId, payload);
+      const updated = ((data as { user?: User }).user ?? data) as User;
+
+      setUsers((prev) => prev.map((u) => (getEntityId(u) === userId ? { ...u, ...updated } : u)));
+      setOpenEdit(false);
+      setSelectedUser(null);
+      showToast("success", "User updated successfully.");
+    } catch (err) {
+      const { status, message } = getErrorMeta(err, "Failed to update user.");
+      if (status === 404) {
+        setOpenEdit(false);
+        setSelectedUser(null);
+        await fetchUsers(searchQuery || undefined);
+        showToast("error", "User no longer exists. List refreshed.");
+        return;
+      }
+      setEditError(message);
+    } finally {
+      setEditing(false);
+    }
+  };
+
+  const requestDelete = (user: User) => {
+    setSelectedUser(user);
+    setOpenDelete(true);
+  };
+
+  const handleDelete = async () => {
+    if (!selectedUser) return;
+
+    try {
+      setDeleting(true);
+      const userId = getEntityId(selectedUser);
+      await deleteUser(userId);
+      setUsers((prev) => prev.filter((u) => getEntityId(u) !== userId));
+      setOpenDelete(false);
+      setSelectedUser(null);
+      showToast("success", "User deleted.");
+    } catch (err) {
+      const { status, message } = getErrorMeta(err, "Failed to delete user.");
+      if (status === 404) {
+        setOpenDelete(false);
+        setSelectedUser(null);
+        await fetchUsers(searchQuery || undefined);
+        showToast("error", "User was already removed. List refreshed.");
+        return;
+      }
+      showToast("error", message);
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   return (
     <>
-      <Header onToggleSidebar={() => { }} />
+      <Header onToggleSidebar={() => {}} />
 
-      {/* Toast */}
       {toast && (
         <div
-          className={`fixed bottom-5 right-5 z-50 flex items-center gap-2.5 px-4 py-3 rounded-xl shadow-lg text-sm font-medium transition-all
-          ${toast.type === "success"
+          className={`fixed bottom-5 right-5 z-50 flex items-center gap-2.5 px-4 py-3 rounded-xl shadow-lg text-sm font-medium transition-all ${
+            toast.type === "success"
               ? "bg-green-50 border border-green-200 text-green-800"
               : "bg-red-50 border border-red-200 text-red-800"
-            }`}
+          }`}
         >
-          {toast.type === "success"
-            ? <CheckCircle className="w-4 h-4 text-green-600 shrink-0" />
-            : <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />}
+          {toast.type === "success" ? (
+            <CheckCircle className="w-4 h-4 text-green-600 shrink-0" />
+          ) : (
+            <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
+          )}
           {toast.message}
         </div>
       )}
@@ -203,177 +325,157 @@ export default function UsersPage() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-3xl font-semibold text-gray-900">User Management</h1>
-            <p className="text-sm text-gray-500">Manage users, roles, and onboarding.</p>
+            <p className="text-sm text-gray-500">Create, update, search, and delete organization users.</p>
           </div>
-          <Button
-            className="gap-2 bg-blue-600 hover:bg-blue-700 text-white"
-            onClick={() => setOpenCreate(true)}
-          >
+          <Button className="gap-2 bg-blue-600 hover:bg-blue-700 text-white" onClick={() => setOpenCreate(true)}>
             <Plus className="w-4 h-4" />
-            Add New User
+            Add User
           </Button>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <Card className="p-4">
             <p className="text-xs text-gray-500">Total Users</p>
-            <p className="text-2xl font-semibold text-gray-900">{totalUsers}</p>
+            <p className="text-2xl font-semibold text-gray-900">{stats.total}</p>
           </Card>
           <Card className="p-4">
-            <p className="text-xs text-gray-500">Admins</p>
-            <p className="text-2xl font-semibold text-gray-900">{adminCount}</p>
+            <p className="text-xs text-gray-500">With Email</p>
+            <p className="text-2xl font-semibold text-gray-900">{stats.withEmail}</p>
           </Card>
           <Card className="p-4">
-            <p className="text-xs text-gray-500">Members</p>
-            <p className="text-2xl font-semibold text-gray-900">{memberCount}</p>
+            <p className="text-xs text-gray-500">With Phone</p>
+            <p className="text-2xl font-semibold text-gray-900">{stats.withPhone}</p>
           </Card>
         </div>
 
-        <Card className="p-4 border border-gray-200 shadow-sm">
-          <div className="flex flex-col gap-4">
-            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-              <Input
-                placeholder="Search by name, email or phone..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="h-10 w-full lg:w-80"
-              />
+        <Card className="p-4 border border-gray-200 shadow-sm space-y-4">
+          <div className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+            <Input
+              placeholder="Search users by name, member ID, email, phone"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              className="h-10 w-full sm:w-96"
+            />
+            <Button variant="outline" onClick={() => setSearchInput("")}>Clear</Button>
+          </div>
 
-              <div className="flex items-center gap-3">
-                <select
-                  value={roleFilter}
-                  onChange={(e) => setRoleFilter(e.target.value)}
-                  className="h-10 rounded-md border border-gray-200 bg-white px-3 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  {uniqueRoles.map((role) => (
-                    <option key={role} value={role}>{role}</option>
-                  ))}
-                </select>
-                <Button variant="ghost" onClick={() => { setSearch(""); setRoleFilter("All Roles") }} className="h-10">Clear</Button>
-              </div>
-            </div>
-
-            <div className="rounded-lg border border-gray-200">
-              <Table>
-                <TableHeader>
-                  <TableRow className="hover:bg-transparent">
-                    <TableHead className="text-xs uppercase tracking-wide text-gray-500">Name / Email</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wide text-gray-500">Phone</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wide text-gray-500">Role</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wide text-gray-500">Join Date</TableHead>
-                    <TableHead className="text-right text-xs uppercase tracking-wide text-gray-500">Actions</TableHead>
+          <div className="rounded-lg border border-gray-200 overflow-hidden">
+            <Table>
+              <TableHeader>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead>Name</TableHead>
+                  <TableHead>Member ID</TableHead>
+                  <TableHead>Email</TableHead>
+                  <TableHead>Phone</TableHead>
+                  <TableHead>Created</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {loading ? (
+                  <TableRow>
+                    <TableCell colSpan={6} className="py-10 text-center text-gray-500">Loading users...</TableCell>
                   </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {loading ? (
-                    <TableRow>
-                      <TableCell colSpan={5} className="py-10 text-center text-gray-500">Loading users...</TableCell>
-                    </TableRow>
-                  ) : filteredUsers.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={5} className="py-10 text-center text-gray-500">No users found.</TableCell>
-                    </TableRow>
-                  ) : (
-                    filteredUsers.map((user, idx) => (
-                      <TableRow key={`${user._id || user.id || user.memberId || user.email || "user"}-${idx}`} className="hover:bg-gray-50/60">
-                        <TableCell className="flex items-center gap-3">
-                          <div className="flex h-9 w-9 items-center justify-center rounded-full bg-blue-100 text-sm font-semibold text-blue-600">
-                            {initials(user.name)}
-                          </div>
-                          <div className="flex flex-col">
-                            <span className="text-sm font-semibold text-gray-900">{user.name}</span>
-                            <span className="text-xs text-gray-500">{user.email ?? "No email"}</span>
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-sm text-gray-700">{user.phone ?? "—"}</TableCell>
-                        <TableCell>
-                          {user.role ? (
-                            <Badge variant="secondary" className="bg-white text-blue-600 border border-gray-200">
-                              {user.role}
-                            </Badge>
-                          ) : (
-                            <span className="text-sm text-gray-400">—</span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-sm text-gray-700">{formatDate(user.createdAt)}</TableCell>
+                ) : users.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={6} className="py-10 text-center text-gray-500">No users found.</TableCell>
+                  </TableRow>
+                ) : (
+                  users.map((user) => {
+                    const id = getEntityId(user);
+                    return (
+                      <TableRow key={id || `${user.memberId}-${user.name}`} className="hover:bg-gray-50/60">
+                        <TableCell className="font-medium text-gray-900">{user.name}</TableCell>
+                        <TableCell>{user.memberId || "-"}</TableCell>
+                        <TableCell>{user.email || "-"}</TableCell>
+                        <TableCell>{user.phone || "-"}</TableCell>
+                        <TableCell>{formatDate(user.createdAt)}</TableCell>
                         <TableCell className="text-right">
-                          <Button variant="ghost" size="icon-sm" className="rounded-lg hover:bg-gray-100 h-8 w-8" aria-label="More actions">
-                            <MoreHorizontal className="size-4 text-gray-600" />
-                          </Button>
+                          <div className="inline-flex items-center gap-2">
+                            <Button variant="outline" size="sm" onClick={() => openEditModal(user)}>
+                              <Pencil className="w-3.5 h-3.5 mr-1" />Edit
+                            </Button>
+                            <Button variant="outline" size="sm" onClick={() => requestDelete(user)}>
+                              <Trash2 className="w-3.5 h-3.5 mr-1" />Delete
+                            </Button>
+                          </div>
                         </TableCell>
                       </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
-            </div>
+                    );
+                  })
+                )}
+              </TableBody>
+            </Table>
           </div>
         </Card>
       </main>
 
       <Dialog open={openCreate} onOpenChange={setOpenCreate}>
-        <DialogContent className="sm:max-w-md rounded-xl">
+        <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>Add New User</DialogTitle>
-            <DialogDescription>Create a new user account for your organization.</DialogDescription>
+            <DialogTitle>Create User</DialogTitle>
+            <DialogDescription>Add a new user in your organization.</DialogDescription>
           </DialogHeader>
 
           <div className="space-y-3">
-            <div className="space-y-1">
-              <label className="text-sm font-medium text-gray-700">Full Name</label>
-              <Input
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="Jane Doe"
-              />
-            </div>
-            <div className="space-y-1">
-              <label className="text-sm font-medium text-gray-700">Member ID</label>
-              <Input
-                value={form.memberId}
-                onChange={(e) => setForm({ ...form, memberId: e.target.value })}
-                placeholder="U1004"
-              />
-            </div>
-            <div className="space-y-1">
-              <label className="text-sm font-medium text-gray-700">Password</label>
-              <Input
-                type="password"
-                value={form.password}
-                onChange={(e) => setForm({ ...form, password: e.target.value })}
-                placeholder="••••••••"
-              />
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <label className="text-sm font-medium text-gray-700">Email (optional)</label>
-                <Input
-                  type="email"
-                  value={form.email}
-                  onChange={(e) => setForm({ ...form, email: e.target.value })}
-                  placeholder="user@example.com"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-sm font-medium text-gray-700">Phone (optional)</label>
-                <Input
-                  value={form.phone}
-                  onChange={(e) => setForm({ ...form, phone: e.target.value })}
-                  placeholder="+1 (555) 123-4567"
-                />
-              </div>
-            </div>
+            <Input value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} placeholder="Name" />
+            <Input value={form.memberId} onChange={(e) => setForm((p) => ({ ...p, memberId: e.target.value }))} placeholder="Member ID" />
+            <Input type="email" value={form.email} onChange={(e) => setForm((p) => ({ ...p, email: e.target.value }))} placeholder="Email (optional)" />
+            <Input value={form.phone} onChange={(e) => setForm((p) => ({ ...p, phone: e.target.value }))} placeholder="Phone (optional)" />
+            <Input type="password" value={form.password} onChange={(e) => setForm((p) => ({ ...p, password: e.target.value }))} placeholder="Password" />
             {formError && <p className="text-sm text-red-600">{formError}</p>}
           </div>
 
-          <DialogFooter className="mt-2">
-            <Button variant="outline" onClick={() => setOpenCreate(false)} className="rounded-lg">Cancel</Button>
-            <Button onClick={handleCreate} disabled={submitting} className="rounded-lg bg-blue-600 hover:bg-blue-700 text-white">
-              {submitting ? "Creating..." : "Create User"}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpenCreate(false)}>Cancel</Button>
+            <Button onClick={handleCreate} disabled={submitting} className="bg-blue-600 hover:bg-blue-700 text-white">
+              {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : "Create User"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={openEdit} onOpenChange={setOpenEdit}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Edit User</DialogTitle>
+            <DialogDescription>Update user details. Set password only if you want to reset it.</DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            <Input value={editForm.name || ""} onChange={(e) => setEditForm((p) => ({ ...p, name: e.target.value }))} placeholder="Name" />
+            <Input value={editForm.memberId || ""} onChange={(e) => setEditForm((p) => ({ ...p, memberId: e.target.value }))} placeholder="Member ID" />
+            <Input type="email" value={editForm.email || ""} onChange={(e) => setEditForm((p) => ({ ...p, email: e.target.value }))} placeholder="Email (optional)" />
+            <Input value={editForm.phone || ""} onChange={(e) => setEditForm((p) => ({ ...p, phone: e.target.value }))} placeholder="Phone (optional)" />
+            <Input type="password" value={editForm.password || ""} onChange={(e) => setEditForm((p) => ({ ...p, password: e.target.value }))} placeholder="New password (optional)" />
+            {editError && <p className="text-sm text-red-600">{editError}</p>}
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpenEdit(false)}>Cancel</Button>
+            <Button onClick={handleUpdate} disabled={editing} className="bg-blue-600 hover:bg-blue-700 text-white">
+              {editing ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save Changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={openDelete} onOpenChange={setOpenDelete}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete User</DialogTitle>
+            <DialogDescription>
+              This action cannot be undone. Delete {selectedUser?.name || "this user"}?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpenDelete(false)}>Cancel</Button>
+            <Button onClick={handleDelete} disabled={deleting} className="bg-red-600 hover:bg-red-700 text-white">
+              {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : "Delete"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </>
-  )
+  );
 }
