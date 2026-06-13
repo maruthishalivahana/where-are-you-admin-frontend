@@ -18,6 +18,7 @@ import {
     Route,
     Milestone,
 } from "lucide-react";
+import LocationSearchInput from "@/components/LocationSearchInput";
 import { RouteManagementHeader } from "@/components/route-management/route-header";
 import {
     getRoutes,
@@ -1089,19 +1090,33 @@ export default function RouteManagementPage() {
                             />
 
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                <input
-                                    type="text"
-                                    placeholder="Start name (e.g. Sangareddy Depot)"
-                                    value={startName}
-                                    onChange={(e) => setStartName(e.target.value)}
-                                    className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                                <LocationSearchInput
+                                    placeholder="Search start location"
+                                    onLocationSelect={(loc) => {
+                                        setStartName(loc.displayName || startName);
+                                        setStartLatInput(String(loc.latitude));
+                                        setStartLngInput(String(loc.longitude));
+                                        setStartLocation({ lat: loc.latitude, lng: loc.longitude });
+                                        try {
+                                            mapRef?.panTo?.({ lat: loc.latitude, lng: loc.longitude });
+                                            mapRef?.setZoom?.(15);
+                                        } catch (e) { }
+                                        setDetailNames((d) => ({ ...d, start: loc.displayName }));
+                                    }}
                                 />
-                                <input
-                                    type="text"
-                                    placeholder="End name (e.g. IIT Main Gate)"
-                                    value={endName}
-                                    onChange={(e) => setEndName(e.target.value)}
-                                    className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                                <LocationSearchInput
+                                    placeholder="Search end location"
+                                    onLocationSelect={(loc) => {
+                                        setEndName(loc.displayName || endName);
+                                        setEndLatInput(String(loc.latitude));
+                                        setEndLngInput(String(loc.longitude));
+                                        setEndLocation({ lat: loc.latitude, lng: loc.longitude });
+                                        try {
+                                            mapRef?.panTo?.({ lat: loc.latitude, lng: loc.longitude });
+                                            mapRef?.setZoom?.(15);
+                                        } catch (e) { }
+                                        setDetailNames((d) => ({ ...d, end: loc.displayName }));
+                                    }}
                                 />
                             </div>
 
@@ -1585,6 +1600,19 @@ export default function RouteManagementPage() {
                                             onChange={(e) => setStopName(e.target.value)}
                                             className="col-span-6 px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
                                         />
+                                        <div className="col-span-12 sm:col-span-6">
+                                            <LocationSearchInput
+                                                placeholder="Search stop location"
+                                                onLocationSelect={(loc) => {
+                                                    setStopLocation({ lat: loc.latitude, lng: loc.longitude });
+                                                    if (!stopName) setStopName(loc.displayName || "");
+                                                    try {
+                                                        mapRef?.panTo?.({ lat: loc.latitude, lng: loc.longitude });
+                                                        mapRef?.setZoom?.(15);
+                                                    } catch (e) { }
+                                                }}
+                                            />
+                                        </div>
                                         <button
                                             type="button"
                                             onClick={() => setMarkerMode("stop")}

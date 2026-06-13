@@ -1,6 +1,7 @@
 ﻿"use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
@@ -74,23 +75,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
             >
                 {/* Logo */}
                 <div className="px-4 py-5 flex items-center gap-3 border-b border-gray-100 min-h-17">
-                    <div className="w-9 h-9 bg-blue-600 rounded-xl flex items-center justify-center shrink-0">
-                        <Bus className="w-5 h-5 text-white" />
-                    </div>
-                    <span
-                        className={cn(
-                            "text-lg font-bold text-blue-600 whitespace-nowrap transition-all duration-200",
-                            isOpen ? "opacity-100 w-auto" : "opacity-0 w-0 overflow-hidden"
-                        )}
-                    >
-                        BusTrack Pro
-                    </span>
-                    <button
-                        onClick={onClose}
-                        className="ml-auto lg:hidden w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-gray-400 transition-colors"
-                    >
-                        <X className="w-4 h-4" />
-                    </button>
+                    <Image width={120} height={120} src="/navixgo.png" alt="NavixGo Logo" />
                 </div>
 
                 {/* Nav */}
